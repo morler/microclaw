@@ -18,7 +18,7 @@ TAP_DIR_DEFAULT="$ROOT_DIR/../../github/homebrew-tap"
 TAP_DIR="${TAP_DIR:-$TAP_DIR_DEFAULT}"
 TAP_REPO="everettjf/homebrew-tap"
 FORMULA_PATH="Formula/microclaw.rb"
-GITHUB_REPO="everettjf/MicroClaw"
+GITHUB_REPO="microclaw/microclaw"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
