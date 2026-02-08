@@ -935,10 +935,7 @@ mod tests {
         assert_eq!(messages[2].role, "user");
 
         if let MessageContent::Text(t) = &messages[0].content {
-            assert_eq!(
-                t,
-                "<user_message sender=\"alice\">hello</user_message>"
-            );
+            assert_eq!(t, "<user_message sender=\"alice\">hello</user_message>");
         } else {
             panic!("Expected Text content");
         }
@@ -1241,7 +1238,10 @@ mod tests {
     #[test]
     fn test_sanitize_xml() {
         assert_eq!(sanitize_xml("hello"), "hello");
-        assert_eq!(sanitize_xml("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(
+            sanitize_xml("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
         assert_eq!(sanitize_xml("a & b"), "a &amp; b");
         assert_eq!(sanitize_xml("x < y > z"), "x &lt; y &gt; z");
     }

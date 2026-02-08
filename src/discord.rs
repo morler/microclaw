@@ -132,10 +132,7 @@ impl EventHandler for Handler {
             Err(e) => {
                 drop(typing);
                 error!("Error processing Discord message: {e}");
-                let _ = msg
-                    .channel_id
-                    .say(&ctx.http, format!("Error: {e}"))
-                    .await;
+                let _ = msg.channel_id.say(&ctx.http, format!("Error: {e}")).await;
             }
         }
     }
@@ -180,10 +177,7 @@ pub async fn start_discord_bot(app_state: Arc<AppState>, token: &str) {
 
     let handler = Handler { app_state };
 
-    let mut client = match Client::builder(token, intents)
-        .event_handler(handler)
-        .await
-    {
+    let mut client = match Client::builder(token, intents).event_handler(handler).await {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to create Discord client: {e}");

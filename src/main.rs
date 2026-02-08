@@ -16,6 +16,7 @@ mod whatsapp;
 
 use config::Config;
 use error::MicroClawError;
+use std::path::Path;
 use tracing::info;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -75,7 +76,7 @@ CONFIG FILE (config.yaml):
       llm_base_url           Custom base URL (optional)
 
     Runtime:
-      data_dir               Data directory (default: ./data)
+      data_dir               Data root (runtime in ./data/runtime, skills in ./data/skills)
       max_tokens             Max tokens per response (default: 8192)
       max_tool_iterations    Max tool loop iterations (default: 25)
       max_history_messages   Chat history context size (default: 50)
@@ -110,6 +111,71 @@ ABOUT:
 
 fn print_version() {
     println!("microclaw {VERSION}");
+}
+
+fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            move_path(&child_src, &child_dst)?;
+        }
+        std::fs::remove_dir_all(src)?;
+    } else {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, dst)?;
+        std::fs::remove_file(src)?;
+    }
+
+    Ok(())
+}
+
+fn migrate_legacy_runtime_layout(data_root: &Path, runtime_dir: &Path) {
+    if std::fs::create_dir_all(runtime_dir).is_err() {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(data_root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str == "skills" || name_str == "runtime" || name_str == "mcp.json" {
+            continue;
+        }
+        let src = entry.path();
+        let dst = runtime_dir.join(name_str);
+        if dst.exists() {
+            continue;
+        }
+        if let Err(e) = move_path(&src, &dst) {
+            tracing::warn!(
+                "Failed to migrate legacy data '{}' -> '{}': {}",
+                src.display(),
+                dst.display(),
+                e
+            );
+        } else {
+            tracing::info!(
+                "Migrated legacy runtime data '{}' -> '{}'",
+                src.display(),
+                dst.display()
+            );
+        }
+    }
 }
 
 #[tokio::main]
@@ -167,31 +233,43 @@ async fn main() -> anyhow::Result<()> {
     };
     info!("Starting MicroClaw bot...");
 
-    let db = db::Database::new(&config.data_dir)?;
+    let data_root_dir = config.data_root_dir();
+    let runtime_data_dir = config.runtime_data_dir();
+    let skills_data_dir = config.skills_data_dir();
+    migrate_legacy_runtime_layout(&data_root_dir, Path::new(&runtime_data_dir));
+
+    let db = db::Database::new(&runtime_data_dir)?;
     info!("Database initialized");
 
-    let memory_manager = memory::MemoryManager::new(&config.data_dir);
+    let memory_manager = memory::MemoryManager::new(&runtime_data_dir);
     info!("Memory manager initialized");
 
-    let skill_manager = skills::SkillManager::new(&config.data_dir);
+    let skill_manager = skills::SkillManager::from_skills_dir(&skills_data_dir);
     let discovered = skill_manager.discover_skills();
     info!(
         "Skill manager initialized ({} skills discovered)",
         discovered.len()
     );
 
-    // Initialize MCP servers (optional, configured via data_dir/mcp.json)
-    let mcp_config_path = std::path::Path::new(&config.data_dir)
-        .join("mcp.json")
-        .to_string_lossy()
-        .to_string();
+    // Initialize MCP servers (optional, configured via <data_root>/mcp.json)
+    let mcp_config_path = data_root_dir.join("mcp.json").to_string_lossy().to_string();
     let mcp_manager = mcp::McpManager::from_config_file(&mcp_config_path).await;
     let mcp_tool_count: usize = mcp_manager.all_tools().len();
     if mcp_tool_count > 0 {
         info!("MCP initialized: {} tools available", mcp_tool_count);
     }
 
-    telegram::run_bot(config, db, memory_manager, skill_manager, mcp_manager).await?;
+    let mut runtime_config = config.clone();
+    runtime_config.data_dir = runtime_data_dir;
+
+    telegram::run_bot(
+        runtime_config,
+        db,
+        memory_manager,
+        skill_manager,
+        mcp_manager,
+    )
+    .await?;
 
     Ok(())
 }

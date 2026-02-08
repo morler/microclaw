@@ -94,7 +94,7 @@ For a deeper dive into the architecture, design decisions, and what it's like to
 MicroClaw maintains persistent memory via `CLAUDE.md` files, inspired by Claude Code's project memory:
 
 ```
-data/groups/
+data/runtime/groups/
     CLAUDE.md                 # Global memory (shared across all chats)
     {chat_id}/
         CLAUDE.md             # Per-chat memory
@@ -140,7 +140,7 @@ Bot: [creates a todo plan, then executes each step, updating progress]
 4. [ ] Add documentation
 ```
 
-Todo lists are stored at `data/groups/{chat_id}/TODO.json` and persist across sessions.
+Todo lists are stored at `data/runtime/groups/{chat_id}/TODO.json` and persist across sessions.
 
 ## Scheduling
 
@@ -301,7 +301,7 @@ All configuration is via environment variables (or `.env` file):
 | `LLM_PROVIDER` | No | `anthropic` | Provider preset ID (or custom ID). `anthropic` uses native Anthropic API, others use OpenAI-compatible API |
 | `LLM_MODEL` | No | provider-specific | Model name (`CLAUDE_MODEL` fallback still supported) |
 | `LLM_BASE_URL` | No | provider preset default | Custom provider base URL |
-| `DATA_DIR` | No | `./data` | Directory for SQLite DB and memory files |
+| `DATA_DIR` | No | `./data` | Data root (`runtime` data in `DATA_DIR/runtime`, skills in `DATA_DIR/skills`) |
 | `MAX_TOKENS` | No | `8192` | Max tokens per model response |
 | `MAX_TOOL_ITERATIONS` | No | `25` | Max tool-use loop iterations per message |
 | `MAX_HISTORY_MESSAGES` | No | `50` | Number of recent messages sent as context |

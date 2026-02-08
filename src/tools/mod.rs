@@ -60,6 +60,7 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(config: &Config, bot: Bot, db: Arc<Database>) -> Self {
+        let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
             Box::new(bash::BashTool),
             Box::new(read_file::ReadFileTool),
@@ -83,7 +84,7 @@ impl ToolRegistry {
             Box::new(schedule::GetTaskHistoryTool::new(db.clone())),
             Box::new(export_chat::ExportChatTool::new(db, &config.data_dir)),
             Box::new(sub_agent::SubAgentTool::new(config)),
-            Box::new(activate_skill::ActivateSkillTool::new(&config.data_dir)),
+            Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
             Box::new(todo::TodoReadTool::new(&config.data_dir)),
             Box::new(todo::TodoWriteTool::new(&config.data_dir)),
         ];
@@ -92,6 +93,7 @@ impl ToolRegistry {
 
     /// Create a restricted tool registry for sub-agents (no side-effect or recursive tools).
     pub fn new_sub_agent(config: &Config) -> Self {
+        let skills_data_dir = config.skills_data_dir();
         let tools: Vec<Box<dyn Tool>> = vec![
             Box::new(bash::BashTool),
             Box::new(read_file::ReadFileTool),
@@ -102,7 +104,7 @@ impl ToolRegistry {
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
-            Box::new(activate_skill::ActivateSkillTool::new(&config.data_dir)),
+            Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
         ];
         ToolRegistry { tools }
     }

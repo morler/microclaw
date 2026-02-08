@@ -12,10 +12,16 @@ pub struct SkillManager {
 }
 
 impl SkillManager {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn from_skills_dir(skills_dir: &str) -> Self {
         SkillManager {
-            skills_dir: PathBuf::from(data_dir).join("skills"),
+            skills_dir: PathBuf::from(skills_dir),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn new(data_dir: &str) -> Self {
+        let skills_dir = PathBuf::from(data_dir).join("skills");
+        SkillManager { skills_dir }
     }
 
     /// Discover all skills by reading subdirectories for SKILL.md files.

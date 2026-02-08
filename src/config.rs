@@ -1,5 +1,6 @@
 use crate::error::MicroClawError;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 fn default_telegram_bot_token() -> String {
@@ -89,6 +90,41 @@ pub struct Config {
 }
 
 impl Config {
+    /// Data root directory. If configured data_dir already ends with `runtime`,
+    /// treat its parent as root for backward compatibility.
+    pub fn data_root_dir(&self) -> PathBuf {
+        let data_path = PathBuf::from(&self.data_dir);
+        if data_path.file_name().and_then(|s| s.to_str()) == Some("runtime") {
+            data_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| data_path.clone())
+        } else {
+            data_path
+        }
+    }
+
+    /// Runtime data directory (db, memory, exports, etc.).
+    pub fn runtime_data_dir(&self) -> String {
+        self.data_root_dir()
+            .join("runtime")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// Skills directory. Prefer `<data_root>/skills`.
+    /// If the app was previously using `<data_root>/runtime/skills`, keep using it.
+    pub fn skills_data_dir(&self) -> String {
+        let preferred = self.data_root_dir().join("skills");
+        let legacy = PathBuf::from(&self.data_dir).join("skills");
+        let selected = if preferred.exists() || !legacy.exists() {
+            preferred
+        } else {
+            legacy
+        };
+        selected.to_string_lossy().to_string()
+    }
+
     /// Load config from YAML file, with fallback to env vars for backward compatibility.
     pub fn load() -> Result<Self, MicroClawError> {
         // 1. Check MICROCLAW_CONFIG env var for custom path
@@ -398,10 +434,27 @@ mod tests {
 
     #[test]
     fn test_config_post_deserialize() {
-        let yaml = "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: ANTHROPIC\n";
+        let yaml =
+            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nllm_provider: ANTHROPIC\n";
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(config.llm_provider, "anthropic");
         assert_eq!(config.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_runtime_and_skills_dirs_from_root_data_dir() {
+        let mut config = test_config();
+        config.data_dir = "./data".into();
+        assert!(config.runtime_data_dir().ends_with("data/runtime"));
+        assert!(config.skills_data_dir().ends_with("data/skills"));
+    }
+
+    #[test]
+    fn test_runtime_and_skills_dirs_from_runtime_data_dir() {
+        let mut config = test_config();
+        config.data_dir = "./data/runtime".into();
+        assert!(config.runtime_data_dir().ends_with("data/runtime"));
+        assert!(config.skills_data_dir().ends_with("data/skills"));
     }
 }

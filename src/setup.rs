@@ -278,10 +278,7 @@ impl SetupApp {
         let default_base_url = find_provider_preset(&provider)
             .map(|p| p.default_base_url)
             .unwrap_or("");
-        let llm_api_key = existing
-            .get("LLM_API_KEY")
-            .cloned()
-            .unwrap_or_default();
+        let llm_api_key = existing.get("LLM_API_KEY").cloned().unwrap_or_default();
 
         Self {
             fields: vec![
@@ -329,7 +326,7 @@ impl SetupApp {
                 },
                 Field {
                     key: "DATA_DIR",
-                    label: "Data directory",
+                    label: "Data root directory",
                     value: existing.get("DATA_DIR").cloned().unwrap_or_else(|| "./data".into()),
                     required: false,
                     secret: false,
@@ -835,7 +832,10 @@ fn save_config_yaml(
     let mut yaml = String::new();
     yaml.push_str("# MicroClaw configuration\n\n");
     yaml.push_str("# Telegram bot token from @BotFather\n");
-    yaml.push_str(&format!("telegram_bot_token: \"{}\"\n", get("TELEGRAM_BOT_TOKEN")));
+    yaml.push_str(&format!(
+        "telegram_bot_token: \"{}\"\n",
+        get("TELEGRAM_BOT_TOKEN")
+    ));
     yaml.push_str("# Bot username without @\n");
     yaml.push_str(&format!("bot_username: \"{}\"\n\n", get("BOT_USERNAME")));
 
@@ -857,9 +857,15 @@ fn save_config_yaml(
     }
 
     yaml.push('\n');
-    let data_dir = values.get("DATA_DIR").cloned().unwrap_or_else(|| "./data".into());
+    let data_dir = values
+        .get("DATA_DIR")
+        .cloned()
+        .unwrap_or_else(|| "./data".into());
     yaml.push_str(&format!("data_dir: \"{}\"\n", data_dir));
-    let tz = values.get("TIMEZONE").cloned().unwrap_or_else(|| "UTC".into());
+    let tz = values
+        .get("TIMEZONE")
+        .cloned()
+        .unwrap_or_else(|| "UTC".into());
     yaml.push_str(&format!("timezone: \"{}\"\n", tz));
 
     fs::write(path, yaml)?;

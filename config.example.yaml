@@ -21,7 +21,9 @@ max_tokens: 8192
 max_tool_iterations: 25
 # Chat history context size
 max_history_messages: 50
-# Data directory for database, memory, skills
+# Data root directory:
+# - runtime files go to <data_dir>/runtime
+# - built-in/custom skills are loaded from <data_dir>/skills
 data_dir: "./data"
 # IANA timezone for scheduling (e.g. "US/Eastern", "Europe/London")
 timezone: "UTC"

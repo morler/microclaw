@@ -12,9 +12,9 @@ pub struct ActivateSkillTool {
 }
 
 impl ActivateSkillTool {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(skills_dir: &str) -> Self {
         ActivateSkillTool {
-            skill_manager: SkillManager::new(data_dir),
+            skill_manager: SkillManager::from_skills_dir(skills_dir),
         }
     }
 }
@@ -92,7 +92,7 @@ mod tests {
     }
 
     fn create_skill(base_dir: &std::path::Path, name: &str, desc: &str, body: &str) {
-        let skill_dir = base_dir.join("skills").join(name);
+        let skill_dir = base_dir.join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         let content = format!("---\nname: {name}\ndescription: {desc}\n---\n{body}\n");
         std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
