@@ -1248,7 +1248,10 @@ mod tests {
             "embedded web asset missing: icon.png"
         );
         let assets_dir = WEB_ASSETS.get_dir("assets");
-        assert!(assets_dir.is_some(), "embedded web asset dir missing: assets");
+        assert!(
+            assets_dir.is_some(),
+            "embedded web asset dir missing: assets"
+        );
         assert!(
             assets_dir.unwrap().files().next().is_some(),
             "embedded web asset dir is empty: assets"
