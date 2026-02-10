@@ -85,18 +85,24 @@ type UiTheme =
   | 'indigo'
 
 const PROVIDER_SUGGESTIONS = [
-  'anthropic',
   'openai',
   'ollama',
   'openrouter',
-  'deepseek',
+  'anthropic',
   'google',
-  'groq',
-  'xai',
-  'mistral',
+  'alibaba',
+  'deepseek',
   'moonshot',
+  'mistral',
+  'azure',
+  'bedrock',
+  'zhipu',
   'minimax',
-  'azure_openai',
+  'cohere',
+  'tencent',
+  'xai',
+  'huggingface',
+  'together',
   'custom',
 ]
 
