@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Badge, Button, Flex, ScrollArea, Separator, Text } from '@radix-ui/themes'
+import type { SessionItem } from '../types'
 
 type SessionSidebarProps = {
   appearance: 'dark' | 'light'
@@ -7,8 +8,8 @@ type SessionSidebarProps = {
   uiTheme: string
   onUiThemeChange: (theme: string) => void
   uiThemeOptions: Array<{ key: string; label: string; color: string }>
-  sessionKeys: string[]
-  sessionKey: string
+  sessionItems: SessionItem[]
+  selectedSessionKey: string
   onSessionSelect: (key: string) => void
   onRefreshSession: (key: string) => void
   onResetSession: (key: string) => void
@@ -23,8 +24,8 @@ export function SessionSidebar({
   uiTheme,
   onUiThemeChange,
   uiThemeOptions,
-  sessionKeys,
-  sessionKey,
+  sessionItems,
+  selectedSessionKey,
   onSessionSelect,
   onRefreshSession,
   onResetSession,
@@ -168,7 +169,7 @@ export function SessionSidebar({
         <Text size="2" weight="medium" color="gray">
           Sessions
         </Text>
-        <Badge variant="surface">{sessionKeys.length}</Badge>
+        <Badge variant="surface">{sessionItems.length}</Badge>
       </Flex>
 
       <div
@@ -185,26 +186,29 @@ export function SessionSidebar({
             </Text>
           </div>
           <div className="flex flex-col gap-1.5 pr-1">
-            {sessionKeys.map((key) => (
+            {sessionItems.map((item) => (
               <button
-                key={key}
+                key={item.session_key}
                 type="button"
-                onClick={() => onSessionSelect(key)}
+                onClick={() => onSessionSelect(item.session_key)}
                 onContextMenu={(e) => {
                   e.preventDefault()
-                  setMenu({ x: e.clientX, y: e.clientY, key })
+                  setMenu({ x: e.clientX, y: e.clientY, key: item.session_key })
                 }}
                 className={
-                  sessionKey === key
+                  selectedSessionKey === item.session_key
                     ? isDark
-                      ? 'flex w-full items-center rounded-lg border border-[color:var(--mc-accent)] bg-[color:var(--mc-bg-panel)] px-3 py-2 text-left shadow-sm'
-                      : 'flex w-full items-center rounded-lg border border-slate-300 bg-white px-3 py-2 text-left shadow-sm'
+                      ? 'flex w-full flex-col items-start rounded-lg border border-[color:var(--mc-accent)] bg-[color:var(--mc-bg-panel)] px-3 py-2 text-left shadow-sm'
+                      : 'flex w-full flex-col items-start rounded-lg border border-slate-300 bg-white px-3 py-2 text-left shadow-sm'
                     : isDark
-                      ? 'flex w-full items-center rounded-lg border border-transparent px-3 py-2 text-left text-slate-300 hover:border-[color:var(--mc-border-soft)] hover:bg-[color:var(--mc-bg-panel)]'
-                      : 'flex w-full items-center rounded-lg border border-transparent px-3 py-2 text-left text-slate-600 hover:border-slate-200 hover:bg-white'
+                      ? 'flex w-full flex-col items-start rounded-lg border border-transparent px-3 py-2 text-left text-slate-300 hover:border-[color:var(--mc-border-soft)] hover:bg-[color:var(--mc-bg-panel)]'
+                      : 'flex w-full flex-col items-start rounded-lg border border-transparent px-3 py-2 text-left text-slate-600 hover:border-slate-200 hover:bg-white'
                 }
               >
-                <span className="max-w-[220px] truncate text-sm font-medium">{key}</span>
+                <span className="max-w-[220px] truncate text-sm font-medium">{item.label}</span>
+                <span className={isDark ? 'mt-0.5 text-[11px] uppercase tracking-wide text-slate-500' : 'mt-0.5 text-[11px] uppercase tracking-wide text-slate-400'}>
+                  {item.chat_type}
+                </span>
               </button>
             ))}
           </div>

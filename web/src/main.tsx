@@ -473,7 +473,7 @@ function App() {
   const [appearance, setAppearance] = useState<Appearance>(readAppearance())
   const [uiTheme, setUiTheme] = useState<UiTheme>(readUiTheme())
   const [sessions, setSessions] = useState<SessionItem[]>([])
-  const [extraSessions, setExtraSessions] = useState<string[]>([])
+  const [extraSessions, setExtraSessions] = useState<SessionItem[]>([])
   const [sessionKey, setSessionKey] = useState<string>('main')
   const [historySeed, setHistorySeed] = useState<ThreadMessageLike[]>([])
   const [historyCountBySession, setHistoryCountBySession] = useState<Record<string, number>>({})
@@ -489,10 +489,49 @@ function App() {
   const [configDraft, setConfigDraft] = useState<Record<string, unknown>>({})
   const [saveStatus, setSaveStatus] = useState<string>('')
 
-  const sessionKeys = useMemo(() => {
-    const keys = ['main', ...extraSessions, ...sessions.map((s) => s.session_key)]
-    return [...new Set(keys)]
-  }, [sessions, extraSessions])
+  const sessionItems = useMemo(() => {
+    const map = new Map<string, SessionItem>()
+
+    for (const item of [...extraSessions, ...sessions]) {
+      if (!map.has(item.session_key)) {
+        map.set(item.session_key, item)
+      }
+    }
+
+    if (!map.has(sessionKey) && !sessionKey.startsWith('chat:')) {
+      map.set(sessionKey, {
+        session_key: sessionKey,
+        label: sessionKey,
+        chat_id: 0,
+        chat_type: 'web',
+      })
+    }
+
+    if (map.size === 0) {
+      map.set('main', {
+        session_key: 'main',
+        label: 'main',
+        chat_id: 0,
+        chat_type: 'web',
+      })
+    }
+
+    return Array.from(map.values())
+  }, [extraSessions, sessions, sessionKey])
+
+  const selectedSession = useMemo(
+    () => sessionItems.find((item) => item.session_key === sessionKey),
+    [sessionItems, sessionKey],
+  )
+
+  const selectedSessionLabel = selectedSession?.label || sessionKey
+  const selectedSessionReadOnly = Boolean(selectedSession && selectedSession.chat_type !== 'web')
+
+  const sessionLabelMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const item of sessionItems) m.set(item.session_key, item.label)
+    return m
+  }, [sessionItems])
 
   async function loadSessions(): Promise<void> {
     const data = await api<{ sessions?: SessionItem[] }>('/api/sessions')
@@ -521,6 +560,11 @@ function App() {
         setError('')
 
         try {
+          if (selectedSessionReadOnly) {
+            setStatusText('Read-only channel')
+            throw new Error('This channel is read-only in Web UI. Send messages from the original channel.')
+          }
+
           const sendResponse = await api<{ run_id?: string }>('/api/send_stream', {
             method: 'POST',
             body: JSON.stringify({
@@ -665,7 +709,7 @@ function App() {
         }
       },
     }),
-    [sessionKey],
+    [sessionKey, selectedSessionReadOnly],
   )
 
   function createSession(): void {
@@ -676,7 +720,13 @@ function App() {
     }
 
     const key = makeSessionKey()
-    setExtraSessions((prev) => (prev.includes(key) ? prev : [key, ...prev]))
+    const item: SessionItem = {
+      session_key: key,
+      label: key,
+      chat_id: 0,
+      chat_type: 'web',
+    }
+    setExtraSessions((prev) => (prev.some((v) => v.session_key === key) ? prev : [item, ...prev]))
     setSessionKey(key)
     setHistoryCountBySession((prev) => ({ ...prev, [key]: 0 }))
     setHistorySeed([])
@@ -732,14 +782,14 @@ function App() {
         body: JSON.stringify({ session_key: targetSession }),
       })
 
-      setExtraSessions((prev) => prev.filter((s) => s !== targetSession))
+      setExtraSessions((prev) => prev.filter((s) => s.session_key !== targetSession))
       setHistoryCountBySession((prev) => {
         const next = { ...prev }
         delete next[targetSession]
         return next
       })
 
-      const fallback = targetSession === 'main' ? 'main' : 'main'
+      const fallback = sessionItems.find((item) => item.session_key !== targetSession)?.session_key || 'main'
       if (targetSession === sessionKey) {
         setSessionKey(fallback)
         await loadHistory(fallback)
@@ -879,8 +929,8 @@ function App() {
             uiTheme={uiTheme}
             onUiThemeChange={(theme) => setUiTheme(theme as UiTheme)}
             uiThemeOptions={UI_THEME_OPTIONS}
-            sessionKeys={sessionKeys}
-            sessionKey={sessionKey}
+            sessionItems={sessionItems}
+            selectedSessionKey={sessionKey}
             onSessionSelect={setSessionKey}
             onRefreshSession={(key) => void onRefreshSessionByKey(key)}
             onResetSession={(key) => void onResetSessionByKey(key)}
@@ -904,7 +954,7 @@ function App() {
               }
             >
               <Heading size="6">
-                {sessionKey}
+                {selectedSessionLabel}
               </Heading>
             </header>
 
@@ -946,7 +996,7 @@ function App() {
             <Dialog.Title>Delete Session</Dialog.Title>
             <Dialog.Description size="2" mb="3">
               {deleteTargetSession
-                ? `Delete "${deleteTargetSession}"? This removes all messages for this chat.`
+                ? `Delete "${sessionLabelMap.get(deleteTargetSession) || deleteTargetSession}"? This removes all messages for this chat.`
                 : 'Delete this chat and all messages?'}
             </Dialog.Description>
             <Flex justify="end" gap="2">

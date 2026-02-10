@@ -317,7 +317,9 @@ fn session_key_to_chat_id(session_key: &str) -> i64 {
 #[derive(Debug, Serialize)]
 struct SessionItem {
     session_key: String,
+    label: String,
     chat_id: i64,
+    chat_type: String,
     last_message_time: String,
     last_message_preview: Option<String>,
 }
@@ -523,15 +525,27 @@ async fn api_update_config(
 }
 
 fn map_chat_to_session(chat: ChatSummary) -> SessionItem {
-    let fallback = format!("web-{}", chat.chat_id);
-    let session_key = chat.chat_title.unwrap_or(fallback);
+    let fallback = format!("{}:{}", chat.chat_type, chat.chat_id);
+    let label = chat.chat_title.clone().unwrap_or(fallback);
 
     SessionItem {
-        session_key,
+        session_key: format!("chat:{}", chat.chat_id),
+        label,
         chat_id: chat.chat_id,
+        chat_type: chat.chat_type,
         last_message_time: chat.last_message_time,
         last_message_preview: chat.last_message_preview,
     }
+}
+
+fn parse_chat_id_from_session_key(session_key: &str) -> Option<i64> {
+    session_key
+        .strip_prefix("chat:")
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
+fn resolve_chat_id(session_key: &str) -> i64 {
+    parse_chat_id_from_session_key(session_key).unwrap_or_else(|| session_key_to_chat_id(session_key))
 }
 
 async fn api_sessions(
@@ -541,7 +555,7 @@ async fn api_sessions(
     require_auth(&headers, state.auth_token.as_deref())?;
 
     let chats = call_blocking(state.app_state.db.clone(), |db| {
-        db.get_chats_by_type("web", 200)
+        db.get_recent_chats(400)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -561,7 +575,7 @@ async fn api_history(
     require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(query.session_key.as_deref());
-    let chat_id = session_key_to_chat_id(&session_key);
+    let chat_id = resolve_chat_id(&session_key);
 
     let mut messages = call_blocking(state.app_state.db.clone(), move |db| {
         db.get_all_messages(chat_id)
@@ -936,7 +950,8 @@ async fn send_and_store_response_with_events(
     }
 
     let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = session_key_to_chat_id(&session_key);
+    let chat_id = resolve_chat_id(&session_key);
+    let parsed_chat_id = parse_chat_id_from_session_key(&session_key);
     let sender_name = body
         .sender_name
         .as_deref()
@@ -945,12 +960,27 @@ async fn send_and_store_response_with_events(
         .unwrap_or("web-user")
         .to_string();
 
-    let session_key_for_chat = session_key.clone();
-    call_blocking(state.app_state.db.clone(), move |db| {
-        db.upsert_chat(chat_id, Some(&session_key_for_chat), "web")
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(explicit_chat_id) = parsed_chat_id {
+        let chat_type = call_blocking(state.app_state.db.clone(), move |db| {
+            db.get_chat_type(explicit_chat_id)
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !matches!(chat_type.as_deref(), Some("web")) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this channel is read-only in Web UI; use source channel to send".into(),
+            ));
+        }
+    } else {
+        let session_key_for_chat = session_key.clone();
+        call_blocking(state.app_state.db.clone(), move |db| {
+            db.upsert_chat(chat_id, Some(&session_key_for_chat), "web")
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     let user_msg = StoredMessage {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1017,7 +1047,7 @@ async fn api_reset(
     require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = session_key_to_chat_id(&session_key);
+    let chat_id = resolve_chat_id(&session_key);
 
     let deleted = call_blocking(state.app_state.db.clone(), move |db| {
         db.delete_session(chat_id)
@@ -1036,7 +1066,7 @@ async fn api_delete_session(
     require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = session_key_to_chat_id(&session_key);
+    let chat_id = resolve_chat_id(&session_key);
 
     let deleted = call_blocking(state.app_state.db.clone(), move |db| {
         db.delete_chat_data(chat_id)
