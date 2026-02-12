@@ -702,7 +702,8 @@ async fn compact_messages(
 
     // Truncate if very long
     if summary_input.len() > 20000 {
-        summary_input.truncate(20000);
+        let cutoff = summary_input.floor_char_boundary(20000);
+        summary_input.truncate(cutoff);
         summary_input.push_str("\n... (truncated)");
     }
 

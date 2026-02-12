@@ -472,7 +472,8 @@ fn split_response_text(text: &str) -> Vec<String> {
         let chunk_len = if remaining.len() <= MAX_LEN {
             remaining.len()
         } else {
-            remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN)
+            let boundary = remaining.floor_char_boundary(MAX_LEN.min(remaining.len()));
+            remaining[..boundary].rfind('\n').unwrap_or(boundary)
         };
         chunks.push(remaining[..chunk_len].to_string());
         remaining = &remaining[chunk_len..];
@@ -496,7 +497,8 @@ pub async fn send_response(bot: &Bot, chat_id: ChatId, text: &str) {
         let chunk_len = if remaining.len() <= MAX_LEN {
             remaining.len()
         } else {
-            remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN)
+            let boundary = remaining.floor_char_boundary(MAX_LEN.min(remaining.len()));
+            remaining[..boundary].rfind('\n').unwrap_or(boundary)
         };
 
         let chunk = &remaining[..chunk_len];

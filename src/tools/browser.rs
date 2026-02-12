@@ -210,7 +210,8 @@ impl Tool for BrowserTool {
 
                 // Truncate very long output
                 if result_text.len() > 30000 {
-                    result_text.truncate(30000);
+                    let cutoff = result_text.floor_char_boundary(30000);
+                    result_text.truncate(cutoff);
                     result_text.push_str("\n... (output truncated)");
                 }
 

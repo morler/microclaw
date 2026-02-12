@@ -13,7 +13,8 @@ fn split_text(text: &str, max_len: usize) -> Vec<String> {
         let chunk_len = if remaining.len() <= max_len {
             remaining.len()
         } else {
-            remaining[..max_len].rfind('\n').unwrap_or(max_len)
+            let boundary = remaining.floor_char_boundary(max_len.min(remaining.len()));
+            remaining[..boundary].rfind('\n').unwrap_or(boundary)
         };
         chunks.push(remaining[..chunk_len].to_string());
         remaining = &remaining[chunk_len..];

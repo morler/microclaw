@@ -870,7 +870,9 @@ fn mask_secret(s: &str) -> String {
     if s.len() <= 6 {
         return "***".into();
     }
-    format!("{}***{}", &s[..3], &s[s.len() - 2..])
+    let left = s.floor_char_boundary(3.min(s.len()));
+    let right_start = s.floor_char_boundary(s.len().saturating_sub(2));
+    format!("{}***{}", &s[..left], &s[right_start..])
 }
 
 fn save_config_yaml(

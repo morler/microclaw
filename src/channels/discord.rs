@@ -201,7 +201,8 @@ async fn send_discord_response(ctx: &Context, channel_id: ChannelId, text: &str)
         let chunk_len = if remaining.len() <= MAX_LEN {
             remaining.len()
         } else {
-            remaining[..MAX_LEN].rfind('\n').unwrap_or(MAX_LEN)
+            let boundary = remaining.floor_char_boundary(MAX_LEN.min(remaining.len()));
+            remaining[..boundary].rfind('\n').unwrap_or(boundary)
         };
 
         let chunk = &remaining[..chunk_len];

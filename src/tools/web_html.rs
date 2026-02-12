@@ -28,6 +28,10 @@ fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<us
     if from >= haystack.len() {
         return None;
     }
+
+    // Callers may pass byte offsets derived from external data; coerce to a valid
+    // UTF-8 boundary to avoid panics when slicing.
+    let from = haystack.floor_char_boundary(from);
     let h = haystack[from..].to_ascii_lowercase();
     let n = needle.to_ascii_lowercase();
     h.find(&n).map(|idx| from + idx)
@@ -127,7 +131,8 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
 }
 
 fn extract_snippet_near(html: &str, from: usize) -> String {
-    let window_end = (from + 4000).min(html.len());
+    let from = html.floor_char_boundary(from.min(html.len()));
+    let window_end = html.floor_char_boundary(from.saturating_add(4000).min(html.len()));
     let segment = &html[from..window_end];
     let Some(class_idx) = find_case_insensitive(segment, "result__snippet", 0) else {
         return String::new();
@@ -244,5 +249,12 @@ mod tests {
     fn test_extract_primary_html_prefers_main() {
         let html = "<body>body</body><main>main section</main>";
         assert_eq!(extract_primary_html(html), "main section");
+    }
+
+    #[test]
+    fn test_find_case_insensitive_non_char_boundary_input() {
+        let s = "abc只def";
+        // byte 4 is inside the multi-byte '只'
+        assert_eq!(find_case_insensitive(s, "def", 4), Some(6));
     }
 }
