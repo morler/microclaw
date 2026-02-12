@@ -16,12 +16,13 @@ use serde_json::json;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 
+use crate::agent_engine::{
+    process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext,
+};
 use crate::channel::deliver_and_store_bot_message;
 use crate::config::{Config, WorkingDirIsolation};
 use crate::db::{call_blocking, ChatSummary, StoredMessage};
-use crate::telegram::{
-    process_with_agent, process_with_agent_with_events, AgentEvent, AgentRequestContext, AppState,
-};
+use crate::runtime::AppState;
 
 static WEB_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web/dist");
 

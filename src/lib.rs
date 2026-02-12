@@ -1,3 +1,4 @@
+pub mod agent_engine;
 pub mod builtin_skills;
 pub mod channel;
 pub mod channels;
@@ -12,6 +13,7 @@ pub mod llm;
 pub mod logging;
 pub mod mcp;
 pub mod memory;
+pub mod runtime;
 pub mod scheduler;
 pub mod setup;
 pub mod skills;

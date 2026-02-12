@@ -7,10 +7,13 @@ use serenity::model::id::ChannelId;
 use serenity::prelude::*;
 use tracing::{error, info};
 
+use crate::agent_engine::archive_conversation;
+use crate::agent_engine::process_with_agent;
+use crate::agent_engine::AgentRequestContext;
 use crate::claude::Message as ClaudeMessage;
 use crate::db::call_blocking;
 use crate::db::StoredMessage;
-use crate::telegram::{archive_conversation, AgentRequestContext, AppState};
+use crate::runtime::AppState;
 
 struct Handler {
     app_state: Arc<AppState>,
@@ -135,7 +138,7 @@ impl EventHandler for Handler {
         let typing = msg.channel_id.start_typing(&ctx.http);
 
         // Process with Claude (reuses the same agentic loop as Telegram)
-        match crate::telegram::process_with_agent(
+        match process_with_agent(
             &self.app_state,
             AgentRequestContext {
                 caller_channel: "discord",

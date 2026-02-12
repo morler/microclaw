@@ -8,9 +8,11 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tracing::{error, info};
 
+use crate::agent_engine::process_with_agent;
+use crate::agent_engine::AgentRequestContext;
 use crate::db::call_blocking;
 use crate::db::StoredMessage;
-use crate::telegram::{AgentRequestContext, AppState};
+use crate::runtime::AppState;
 
 // --- Webhook query params for verification ---
 
@@ -199,7 +201,7 @@ async fn process_webhook(state: &WhatsAppState, payload: WebhookPayload) -> anyh
                 );
 
                 // Process with Claude (reuses the same agentic loop as Telegram)
-                match crate::telegram::process_with_agent(
+                match process_with_agent(
                     &state.app_state,
                     AgentRequestContext {
                         caller_channel: "whatsapp",

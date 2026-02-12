@@ -4,9 +4,11 @@ use std::sync::Arc;
 use chrono::Utc;
 use tracing::{error, info};
 
+use crate::agent_engine::process_with_agent;
+use crate::agent_engine::AgentRequestContext;
 use crate::channel::deliver_and_store_bot_message;
 use crate::db::call_blocking;
-use crate::telegram::{AgentRequestContext, AppState};
+use crate::runtime::AppState;
 
 fn channel_from_chat_type(chat_type: &str) -> &'static str {
     match chat_type {
@@ -52,7 +54,7 @@ async fn run_due_tasks(state: &Arc<AppState>) {
             };
 
         // Run agent loop with the task prompt
-        let (success, result_summary) = match crate::telegram::process_with_agent(
+        let (success, result_summary) = match process_with_agent(
             state,
             AgentRequestContext {
                 caller_channel: channel,
