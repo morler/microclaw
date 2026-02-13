@@ -801,23 +801,24 @@ async fn api_memory_observability(
         Some(resolve_chat_id_for_session_key(&state, &session_key).await?)
     };
 
-    let summary = call_blocking(state.app_state.db.clone(), {
-        let chat_id_filter = chat_id_filter;
-        move |db| db.get_memory_observability_summary(chat_id_filter)
+    let summary = call_blocking(state.app_state.db.clone(), move |db| {
+        db.get_memory_observability_summary(chat_id_filter)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let since_for_reflector = since.clone();
     let reflector_runs = call_blocking(state.app_state.db.clone(), {
-        let chat_id_filter = chat_id_filter;
-        let since = since.clone();
-        move |db| db.get_memory_reflector_runs(chat_id_filter, Some(&since), limit, offset)
+        move |db| {
+            db.get_memory_reflector_runs(chat_id_filter, Some(&since_for_reflector), limit, offset)
+        }
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let since_for_injection = since.clone();
     let injection_logs = call_blocking(state.app_state.db.clone(), move |db| {
-        db.get_memory_injection_logs(chat_id_filter, Some(&since), limit, offset)
+        db.get_memory_injection_logs(chat_id_filter, Some(&since_for_injection), limit, offset)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

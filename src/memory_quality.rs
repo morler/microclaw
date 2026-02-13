@@ -32,7 +32,7 @@ pub fn memory_quality_reason(content: &str) -> Result<(), &'static str> {
         "lol",
         "haha",
     ];
-    if low_signal_starts.iter().any(|s| trimmed == *s) {
+    if low_signal_starts.contains(&trimmed) {
         return Err("small talk");
     }
     if trimmed.contains("maybe")
@@ -67,16 +67,16 @@ pub fn extract_explicit_memory_command(text: &str) -> Option<String> {
         "memo:",
     ];
     for p in prefixes {
-        if lower.starts_with(p) {
-            let raw = t[p.len()..].trim();
+        if let Some(raw_with_prefix) = lower.strip_prefix(p) {
+            let raw = t[t.len() - raw_with_prefix.len()..].trim();
             return normalize_memory_content(raw, 180);
         }
     }
 
     let zh_prefixes = ["记住：", "记住:", "请记住", "记一下：", "记一下:"];
     for p in zh_prefixes {
-        if t.starts_with(p) {
-            let raw = t[p.len()..].trim();
+        if let Some(raw) = t.strip_prefix(p) {
+            let raw = raw.trim();
             return normalize_memory_content(raw, 180);
         }
     }

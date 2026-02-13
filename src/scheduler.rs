@@ -523,7 +523,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         if let Some(prev_id) = topic_latest.get(&topic_key).copied() {
             if let Some(prev) = existing_by_id.get(&prev_id) {
                 if !prev.content.eq_ignore_ascii_case(&content)
-                    && jaccard_similar(&prev.content, &content, 0.85) == false
+                    && !jaccard_similar(&prev.content, &content, 0.85)
                 {
                     let new_content = content.to_string();
                     let new_category = category.to_string();
