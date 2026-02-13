@@ -43,14 +43,14 @@ const PROVIDER_PRESETS: &[ProviderPreset] = &[
         label: "OpenAI",
         protocol: ProviderProtocol::OpenAiCompat,
         default_base_url: "https://api.openai.com/v1",
-        models: &["gpt-5.2", "gpt-5", "gpt-5-mini"],
+        models: &["gpt-5.2"],
     },
     ProviderPreset {
         id: "openai-codex",
         label: "OpenAI Codex (ChatGPT subscription OAuth)",
         protocol: ProviderProtocol::OpenAiCompat,
         default_base_url: "https://chatgpt.com/backend-api",
-        models: &["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex"],
+        models: &["gpt-5.3-codex"],
     },
     ProviderPreset {
         id: "openrouter",

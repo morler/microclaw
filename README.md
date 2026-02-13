@@ -332,6 +332,7 @@ Choose a provider and create an API key:
 - Anthropic: [console.anthropic.com](https://console.anthropic.com/)
 - OpenAI: [platform.openai.com](https://platform.openai.com/)
 - Or any OpenAI-compatible provider (OpenRouter, DeepSeek, etc.)
+- For `openai-codex`, use OAuth (`codex login`) instead of an API key.
 
 ### 3. Configure (recommended: interactive Q&A)
 
@@ -380,7 +381,7 @@ Provider presets available in the wizard:
 
 For Ollama, `llm_base_url` defaults to `http://127.0.0.1:11434/v1`, `api_key` is optional, and the interactive setup wizard can auto-detect locally installed models.
 
-For `openai-codex`, run `codex login` first. MicroClaw will read OAuth from `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). The default base URL is `https://chatgpt.com/backend-api`.
+For `openai-codex`, run `codex login` first. MicroClaw will read OAuth from `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`). `api_key` is optional and ignored for this provider. The default base URL is `https://chatgpt.com/backend-api`.
 
 You can still configure manually with `microclaw.config.yaml`:
 
@@ -435,7 +436,7 @@ All configuration is via `microclaw.config.yaml`:
 | Key | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `telegram_bot_token` | Yes | -- | Telegram bot token from BotFather |
-| `api_key` | Yes* | -- | LLM API key (`ollama` and `openai-codex` can leave this empty) |
+| `api_key` | Yes* | -- | LLM API key (`ollama` can leave this empty; `openai-codex` uses OAuth and ignores this field) |
 | `bot_username` | Yes | -- | Bot username (without @) |
 | `llm_provider` | No | `anthropic` | Provider preset ID (or custom ID). `anthropic` uses native Anthropic API, others use OpenAI-compatible API |
 | `model` | No | provider-specific | Model name |
@@ -527,7 +528,7 @@ src/
     error.rs             # Error types (thiserror)
     telegram.rs          # Telegram handler, agentic tool-use loop, session resume, context compaction, typing indicator
     llm.rs               # LLM provider abstraction (Anthropic + OpenAI-compatible)
-    claude.rs            # Canonical message/tool schema + Anthropic-compatible types
+    llm_types.rs         # Canonical message/tool schema shared across LLM adapters
     db.rs                # SQLite: messages, chats, scheduled_tasks, sessions
     memory.rs            # CLAUDE.md memory system
     skills.rs            # Agent skills system (discovery, activation)

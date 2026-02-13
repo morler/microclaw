@@ -1301,7 +1301,7 @@ function App() {
                           LLM provider and API settings.
                         </Text>
                         <Text size="1" color="gray" className="mt-2 block">llm_provider selects routing preset; model is the exact model id sent to provider API.</Text>
-                        <Text size="1" color="gray" className="mt-1 block">For custom providers set llm_base_url. For <code>openai-codex</code> and <code>ollama</code>, api_key can be empty.</Text>
+                        <Text size="1" color="gray" className="mt-1 block">For custom providers set <code>llm_base_url</code>. <code>openai-codex</code> uses OAuth from <code>codex login</code> and ignores <code>api_key</code>. <code>ollama</code> can leave <code>api_key</code> empty.</Text>
                         <div className="mt-4 space-y-3">
                           <ConfigFieldCard label="llm_provider" description={<>Select provider preset for request routing and defaults.</>}>
                             <div className="mt-2">
@@ -1344,12 +1344,19 @@ function App() {
                           </ConfigFieldCard>
                           ) : null}
 
-                          <ConfigFieldCard label="api_key" description={<>Provider API key. Leave blank to keep current secret unchanged.</>}>
+                          <ConfigFieldCard
+                            label="api_key"
+                            description={
+                              currentProvider === 'openai-codex'
+                                ? <>Not used for <code>openai-codex</code>. Authentication comes from OAuth (<code>codex login</code>).</>
+                                : <>Provider API key. Leave blank to keep current secret unchanged.</>
+                            }
+                          >
                             <TextField.Root
                               className="mt-2"
                               value={String(configDraft.api_key || '')}
                               onChange={(e) => setConfigField('api_key', e.target.value)}
-                              placeholder="sk-..."
+                              placeholder={currentProvider === 'openai-codex' ? '(ignored for openai-codex)' : 'sk-...'}
                             />
                           </ConfigFieldCard>
                         </div>
