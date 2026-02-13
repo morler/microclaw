@@ -1023,6 +1023,86 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ids)
     }
+
+    /// Keyword search in memories visible to chat_id (own + global).
+    pub fn search_memories(
+        &self,
+        chat_id: i64,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, MicroClawError> {
+        let conn = self.lock_conn();
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_id, content, category, created_at, updated_at
+             FROM memories
+             WHERE (chat_id = ?1 OR chat_id IS NULL)
+               AND LOWER(content) LIKE ?2
+             ORDER BY updated_at DESC
+             LIMIT ?3",
+        )?;
+        let memories = stmt
+            .query_map(params![chat_id, pattern, limit as i64], |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    content: row.get(2)?,
+                    category: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(memories)
+    }
+
+    /// Delete a memory row by id. Returns true if a row was deleted.
+    pub fn delete_memory(&self, id: i64) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let rows = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Update content and category of an existing memory. Returns true if found.
+    pub fn update_memory_content(
+        &self,
+        id: i64,
+        content: &str,
+        category: &str,
+    ) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE memories SET content = ?1, category = ?2, updated_at = ?3 WHERE id = ?4",
+            params![content, category, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Get a single memory by id.
+    pub fn get_memory_by_id(&self, id: i64) -> Result<Option<Memory>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT id, chat_id, content, category, created_at, updated_at
+             FROM memories WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    content: row.get(2)?,
+                    category: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(m) => Ok(Some(m)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1798,6 +1878,80 @@ mod tests {
             .get_active_chat_ids_since("2025-01-01T00:00:00Z")
             .unwrap();
         assert!(ids_empty.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_search_memories() {
+        let (db, dir) = test_db();
+        db.insert_memory(Some(100), "User is a Rust developer", "PROFILE")
+            .unwrap();
+        db.insert_memory(Some(100), "User loves coffee", "PROFILE")
+            .unwrap();
+        db.insert_memory(None, "Rust is fast and safe", "KNOWLEDGE")
+            .unwrap();
+
+        let results = db.search_memories(100, "rust", 10).unwrap();
+        assert_eq!(results.len(), 2); // own + global both match "rust"
+
+        let results = db.search_memories(100, "coffee", 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let results = db.search_memories(100, "nonexistent_xyz", 10).unwrap();
+        assert!(results.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_delete_memory() {
+        let (db, dir) = test_db();
+        let id = db
+            .insert_memory(Some(100), "to be deleted", "EVENT")
+            .unwrap();
+
+        assert!(db.delete_memory(id).unwrap());
+        assert!(!db.delete_memory(id).unwrap()); // already gone
+        assert!(db.get_memory_by_id(id).unwrap().is_none());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_update_memory_content() {
+        let (db, dir) = test_db();
+        let id = db
+            .insert_memory(Some(100), "User lives in Tokyo", "PROFILE")
+            .unwrap();
+
+        assert!(db
+            .update_memory_content(id, "User lives in Osaka", "PROFILE")
+            .unwrap());
+
+        let mem = db.get_memory_by_id(id).unwrap().unwrap();
+        assert_eq!(mem.content, "User lives in Osaka");
+        assert_eq!(mem.category, "PROFILE");
+
+        // Non-existent id
+        assert!(!db.update_memory_content(9999, "x", "PROFILE").unwrap());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_get_memory_by_id() {
+        let (db, dir) = test_db();
+        let id = db
+            .insert_memory(Some(100), "test memory", "KNOWLEDGE")
+            .unwrap();
+
+        let mem = db.get_memory_by_id(id).unwrap().unwrap();
+        assert_eq!(mem.id, id);
+        assert_eq!(mem.content, "test memory");
+        assert_eq!(mem.category, "KNOWLEDGE");
+
+        assert!(db.get_memory_by_id(9999).unwrap().is_none());
 
         cleanup(&dir);
     }

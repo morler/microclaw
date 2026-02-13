@@ -157,7 +157,8 @@ Rules:
 - IGNORE: greetings, small talk, unanswered questions, transient requests
 - Each memory < 150 characters, specific and concrete
 - Category must be exactly one of: PROFILE (user attributes/preferences), KNOWLEDGE (facts/expertise), EVENT (significant things that happened)
-- Output ONLY valid JSON array: [{"content":"...","category":"PROFILE"}]
+- If a new memory updates or supersedes an existing one, add "supersedes_id": <id> to replace it
+- Output ONLY valid JSON array: [{"content":"...","category":"PROFILE","supersedes_id":null}]
 - If nothing worth remembering: []"#;
 
 fn jaccard_similar(a: &str, b: &str, threshold: f64) -> bool {
@@ -233,11 +234,32 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // 3. Call LLM directly (no tools, no session)
+    // 3. Load existing memories (needed for dedup and to pass to LLM for merge)
+    let existing = match call_blocking(state.db.clone(), move |db| {
+        db.get_all_memories_for_chat(Some(chat_id))
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    let existing_hint = if existing.is_empty() {
+        String::new()
+    } else {
+        let lines = existing
+            .iter()
+            .map(|m| format!("  [id={}] [{}] {}", m.id, m.category, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nExisting memories (use supersedes_id to replace stale ones):\n{lines}")
+    };
+
+    // 4. Call LLM directly (no tools, no session)
     let user_msg = Message {
         role: "user".into(),
         content: MessageContent::Text(format!(
-            "Extract memories from this conversation (chat_id={chat_id}):\n\n{conversation}"
+            "Extract memories from this conversation (chat_id={chat_id}):{existing_hint}\n\nConversation:\n{conversation}"
         )),
     };
     let response = match state
@@ -252,7 +274,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         }
     };
 
-    // 4. Extract text from response
+    // 5. Extract text from response
     let text = response
         .content
         .iter()
@@ -266,7 +288,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         .collect::<Vec<_>>()
         .join("");
 
-    // 5. Parse JSON array
+    // 6. Parse JSON array
     let extracted: Vec<serde_json::Value> = match serde_json::from_str(text.trim()) {
         Ok(v) => v,
         Err(_) => {
@@ -290,18 +312,9 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         return;
     }
 
-    // 6. Load existing memories for dedup
-    let existing = match call_blocking(state.db.clone(), move |db| {
-        db.get_all_memories_for_chat(Some(chat_id))
-    })
-    .await
-    {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-
-    // 7. Insert non-duplicate memories
+    // 7. Insert new memories or update superseded ones
     let mut inserted = 0usize;
+    let mut updated = 0usize;
     for item in &extracted {
         let content = match item.get("content").and_then(|v| v.as_str()) {
             Some(s) => s,
@@ -316,6 +329,25 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
             continue;
         }
 
+        // If the LLM flagged an existing memory to supersede, update it
+        let supersedes_id = item.get("supersedes_id").and_then(|v| v.as_i64());
+        if let Some(sid) = supersedes_id {
+            if existing.iter().any(|m| m.id == sid) {
+                let content = content.to_string();
+                let category = category.to_string();
+                if call_blocking(state.db.clone(), move |db| {
+                    db.update_memory_content(sid, &content, &category)
+                })
+                .await
+                .is_ok()
+                {
+                    updated += 1;
+                }
+                continue;
+            }
+        }
+
+        // Skip if too similar to any existing memory (dedup)
         if existing
             .iter()
             .any(|m| jaccard_similar(&m.content, content, 0.5))
@@ -335,8 +367,8 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         }
     }
 
-    if inserted > 0 {
-        info!("Reflector: chat {chat_id} → {inserted} new memories");
+    if inserted > 0 || updated > 0 {
+        info!("Reflector: chat {chat_id} → {inserted} new, {updated} updated memories");
     }
 }
 

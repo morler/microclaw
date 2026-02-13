@@ -66,7 +66,7 @@ impl Tool for SubAgentTool {
         info!("Sub-agent starting task: {}", task);
 
         let llm = crate::llm::create_provider(&self.config);
-        let tools = ToolRegistry::new_sub_agent(&self.config);
+        let tools = ToolRegistry::new_sub_agent(&self.config, self.db.clone());
         let tool_defs = tools.definitions();
 
         let system_prompt = "You are a sub-agent assistant. Complete the given task thoroughly and return a clear, concise result. You have access to tools for file operations, search, and web access. Focus on the task and provide actionable output.".to_string();
@@ -289,15 +289,15 @@ mod tests {
     #[test]
     fn test_sub_agent_restricted_registry_tool_count() {
         let config = test_config();
-        let registry = ToolRegistry::new_sub_agent(&config);
+        let registry = ToolRegistry::new_sub_agent(&config, test_db());
         let defs = registry.definitions();
-        assert_eq!(defs.len(), 11);
+        assert_eq!(defs.len(), 12);
     }
 
     #[test]
     fn test_sub_agent_restricted_registry_excluded_tools() {
         let config = test_config();
-        let registry = ToolRegistry::new_sub_agent(&config);
+        let registry = ToolRegistry::new_sub_agent(&config, test_db());
         let defs = registry.definitions();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
 
@@ -311,6 +311,7 @@ mod tests {
         assert!(names.contains(&"web_search"));
         assert!(names.contains(&"web_fetch"));
         assert!(names.contains(&"read_memory"));
+        assert!(names.contains(&"structured_memory_search"));
 
         // Should NOT include
         assert!(!names.contains(&"sub_agent"));

@@ -43,6 +43,10 @@ latest_release_tag() {
   git tag --list 'v*' --sort=-version:refname | head -n1
 }
 
+contains_digit_four() {
+  [[ "$1" == *4* ]]
+}
+
 build_release_notes() {
   local prev_tag="$1"
   local new_tag="$2"
@@ -122,8 +126,27 @@ fi
 PREV_TAG="$(latest_release_tag)"
 CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+NEW_MAJOR="$MAJOR"
+NEW_MINOR="$MINOR"
+
+while contains_digit_four "$NEW_MAJOR"; do
+  NEW_MAJOR=$((NEW_MAJOR + 1))
+  NEW_MINOR=0
+  PATCH=0
+done
+
+while contains_digit_four "$NEW_MINOR"; do
+  NEW_MINOR=$((NEW_MINOR + 1))
+  PATCH=0
+done
+
 NEW_PATCH=$((PATCH + 1))
-NEW_VERSION="$MAJOR.$MINOR.$NEW_PATCH"
+NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
+while contains_digit_four "$NEW_VERSION"; do
+  NEW_PATCH=$((NEW_PATCH + 1))
+  NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
+done
 TAG="v$NEW_VERSION"
 
 if [ "$PREV_TAG" = "$TAG" ]; then

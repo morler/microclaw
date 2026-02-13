@@ -12,6 +12,7 @@ pub mod path_guard;
 pub mod read_file;
 pub mod schedule;
 pub mod send_message;
+pub mod structured_memory;
 pub mod sub_agent;
 pub mod sync_skills;
 pub mod todo;
@@ -105,7 +106,9 @@ pub fn tool_risk(name: &str) -> ToolRisk {
         | "schedule_task"
         | "pause_scheduled_task"
         | "resume_scheduled_task"
-        | "cancel_scheduled_task" => ToolRisk::Medium,
+        | "cancel_scheduled_task"
+        | "structured_memory_delete"
+        | "structured_memory_update" => ToolRisk::Medium,
         _ => ToolRisk::Low,
     }
 }
@@ -342,12 +345,21 @@ impl ToolRegistry {
             Box::new(sync_skills::SyncSkillsTool::new(&skills_data_dir)),
             Box::new(todo::TodoReadTool::new(&config.data_dir)),
             Box::new(todo::TodoWriteTool::new(&config.data_dir)),
+            Box::new(structured_memory::StructuredMemorySearchTool::new(
+                db.clone(),
+            )),
+            Box::new(structured_memory::StructuredMemoryDeleteTool::new(
+                db.clone(),
+            )),
+            Box::new(structured_memory::StructuredMemoryUpdateTool::new(
+                db.clone(),
+            )),
         ];
         ToolRegistry { tools }
     }
 
     /// Create a restricted tool registry for sub-agents (no side-effect or recursive tools).
-    pub fn new_sub_agent(config: &Config) -> Self {
+    pub fn new_sub_agent(config: &Config, db: Arc<Database>) -> Self {
         let working_dir = PathBuf::from(&config.working_dir);
         if let Err(e) = std::fs::create_dir_all(&working_dir) {
             tracing::warn!(
@@ -387,6 +399,7 @@ impl ToolRegistry {
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
             Box::new(activate_skill::ActivateSkillTool::new(&skills_data_dir)),
+            Box::new(structured_memory::StructuredMemorySearchTool::new(db)),
         ];
         ToolRegistry { tools }
     }

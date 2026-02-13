@@ -135,20 +135,7 @@ pub(crate) async fn process_with_agent_impl(
 ) -> anyhow::Result<String> {
     let chat_id = context.chat_id;
 
-    // Build system prompt
-    let file_memory = state.memory.build_memory_context(chat_id);
-    let db_memory = build_db_memory_context(&state.db, chat_id).await;
-    let memory_context = format!("{}{}", file_memory, db_memory);
-    let skills_catalog = state.skills.build_skills_catalog();
-    let system_prompt = build_system_prompt(
-        &state.config.bot_username,
-        context.caller_channel,
-        &memory_context,
-        chat_id,
-        &skills_catalog,
-    );
-
-    // Try to resume from session
+    // Load messages first so we can use the latest user message as the relevance query
     let mut messages = if let Some((json, updated_at)) =
         call_blocking(state.db.clone(), move |db| db.load_session(chat_id)).await?
     {
@@ -196,6 +183,36 @@ pub(crate) async fn process_with_agent_impl(
             content: MessageContent::Text(format!("[scheduler]: {prompt}")),
         });
     }
+
+    // Extract the latest user message text for relevance-based memory scoring
+    let query: String = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| {
+            if let MessageContent::Text(t) = &m.content {
+                Some(t.as_str())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("")
+        .chars()
+        .take(500)
+        .collect();
+
+    // Build system prompt
+    let file_memory = state.memory.build_memory_context(chat_id);
+    let db_memory = build_db_memory_context(&state.db, chat_id, &query).await;
+    let memory_context = format!("{}{}", file_memory, db_memory);
+    let skills_catalog = state.skills.build_skills_catalog();
+    let system_prompt = build_system_prompt(
+        &state.config.bot_username,
+        context.caller_channel,
+        &memory_context,
+        chat_id,
+        &skills_catalog,
+    );
 
     // If image_data is present, convert the last user message to a blocks-based message with the image
     if let Some((base64_data, media_type)) = image_data {
@@ -499,9 +516,42 @@ pub(crate) async fn load_messages_from_db(
     ))
 }
 
-pub(crate) async fn build_db_memory_context(db: &std::sync::Arc<Database>, chat_id: i64) -> String {
+fn score_relevance(content: &str, query: &str) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    let query_words: std::collections::HashSet<String> = query
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| w.len() > 2)
+        .collect();
+    if query_words.is_empty() {
+        return 0;
+    }
+    content
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| query_words.contains(w))
+        .count()
+}
+
+pub(crate) async fn build_db_memory_context(
+    db: &std::sync::Arc<Database>,
+    chat_id: i64,
+    query: &str,
+) -> String {
     let memories = match call_blocking(db.clone(), move |db| {
-        db.get_memories_for_context(chat_id, 30)
+        db.get_memories_for_context(chat_id, 100)
     })
     .await
     {
@@ -513,8 +563,17 @@ pub(crate) async fn build_db_memory_context(db: &std::sync::Arc<Database>, chat_
         return String::new();
     }
 
+    // Score by relevance to current query; preserve recency order for ties
+    let mut scored: Vec<(usize, &crate::db::Memory)> = memories
+        .iter()
+        .map(|m| (score_relevance(&m.content, query), m))
+        .collect();
+    if !query.is_empty() {
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+
     let mut out = String::from("<structured_memories>\n");
-    for m in &memories {
+    for (_, m) in scored.into_iter().take(20) {
         let scope = if m.chat_id.is_none() {
             "global"
         } else {
