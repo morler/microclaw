@@ -33,6 +33,14 @@ max_tool_iterations: 100
 max_history_messages: 50
 # Maximum inbound Telegram document size in MB
 max_document_size_mb: 100
+# Estimated token budget for injecting structured memories into system prompt
+memory_token_budget: 1500
+# Optional embedding runtime config (requires binary built with --features sqlite-vec)
+# embedding_provider: "openai"   # openai | ollama
+# embedding_api_key: ""
+# embedding_base_url: ""
+# embedding_model: "text-embedding-3-small"
+# embedding_dim: 1536
 # Data root directory:
 # - runtime files go to <data_dir>/runtime
 # - built-in/custom skills are loaded from <data_dir>/skills

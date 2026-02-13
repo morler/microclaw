@@ -31,7 +31,7 @@ pub async fn send_telegram_text(bot: &Bot, chat_id: i64, text: &str) -> Result<(
     Ok(())
 }
 
-pub async fn send_discord_text(config: &Config, chat_id: i64, text: &str) -> Result<(), String> {
+pub async fn send_discord_text(config: &Config, chat_id: u64, text: &str) -> Result<(), String> {
     let token = config
         .discord_bot_token
         .as_deref()

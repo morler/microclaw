@@ -400,6 +400,51 @@ impl SetupApp {
                     required: false,
                     secret: false,
                 },
+                Field {
+                    key: "MEMORY_TOKEN_BUDGET",
+                    label: "Memory token budget (structured memories)",
+                    value: existing
+                        .get("MEMORY_TOKEN_BUDGET")
+                        .cloned()
+                        .unwrap_or_else(|| "1500".into()),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "EMBEDDING_PROVIDER",
+                    label: "Embedding provider (optional: openai/ollama)",
+                    value: existing.get("EMBEDDING_PROVIDER").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "EMBEDDING_API_KEY",
+                    label: "Embedding API key (optional)",
+                    value: existing.get("EMBEDDING_API_KEY").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
+                    key: "EMBEDDING_BASE_URL",
+                    label: "Embedding base URL (optional)",
+                    value: existing.get("EMBEDDING_BASE_URL").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "EMBEDDING_MODEL",
+                    label: "Embedding model (optional)",
+                    value: existing.get("EMBEDDING_MODEL").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "EMBEDDING_DIM",
+                    label: "Embedding dimension (optional)",
+                    value: existing.get("EMBEDDING_DIM").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
             ],
             selected: 0,
             editing: false,
@@ -469,6 +514,25 @@ impl SetupApp {
                         "REFLECTOR_INTERVAL_MINS".into(),
                         config.reflector_interval_mins.to_string(),
                     );
+                    map.insert(
+                        "MEMORY_TOKEN_BUDGET".into(),
+                        config.memory_token_budget.to_string(),
+                    );
+                    if let Some(v) = config.embedding_provider {
+                        map.insert("EMBEDDING_PROVIDER".into(), v);
+                    }
+                    if let Some(v) = config.embedding_api_key {
+                        map.insert("EMBEDDING_API_KEY".into(), v);
+                    }
+                    if let Some(v) = config.embedding_base_url {
+                        map.insert("EMBEDDING_BASE_URL".into(), v);
+                    }
+                    if let Some(v) = config.embedding_model {
+                        map.insert("EMBEDDING_MODEL".into(), v);
+                    }
+                    if let Some(v) = config.embedding_dim {
+                        map.insert("EMBEDDING_DIM".into(), v.to_string());
+                    }
                     return map;
                 }
             }
@@ -617,6 +681,30 @@ impl SetupApp {
             working_dir
         };
         fs::create_dir_all(&workdir)?;
+
+        let memory_token_budget_raw = self.field_value("MEMORY_TOKEN_BUDGET");
+        if !memory_token_budget_raw.is_empty() {
+            let memory_token_budget = memory_token_budget_raw.parse::<usize>().map_err(|_| {
+                MicroClawError::Config("MEMORY_TOKEN_BUDGET must be a positive integer".into())
+            })?;
+            if memory_token_budget == 0 {
+                return Err(MicroClawError::Config(
+                    "MEMORY_TOKEN_BUDGET must be greater than 0".into(),
+                ));
+            }
+        }
+
+        let embedding_dim_raw = self.field_value("EMBEDDING_DIM");
+        if !embedding_dim_raw.is_empty() {
+            let embedding_dim = embedding_dim_raw.parse::<usize>().map_err(|_| {
+                MicroClawError::Config("EMBEDDING_DIM must be a positive integer".into())
+            })?;
+            if embedding_dim == 0 {
+                return Err(MicroClawError::Config(
+                    "EMBEDDING_DIM must be greater than 0".into(),
+                ));
+            }
+        }
 
         Ok(())
     }
@@ -890,6 +978,9 @@ impl SetupApp {
             "WORKING_DIR" => "./tmp".into(),
             "REFLECTOR_ENABLED" => "true".into(),
             "REFLECTOR_INTERVAL_MINS" => "15".into(),
+            "MEMORY_TOKEN_BUDGET" => "1500".into(),
+            "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
+            | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => String::new(),
             _ => String::new(),
         }
     }
@@ -917,8 +1008,11 @@ impl SetupApp {
             | "TIMEZONE"
             | "WORKING_DIR"
             | "REFLECTOR_ENABLED"
-            | "REFLECTOR_INTERVAL_MINS" => "App",
-            "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL" => "Model",
+            | "REFLECTOR_INTERVAL_MINS"
+            | "MEMORY_TOKEN_BUDGET" => "App",
+            "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL"
+            | "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
+            | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => "Model",
             "ENABLED_CHANNELS" | "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "DISCORD_BOT_TOKEN" => {
                 "Channel"
             }
@@ -933,10 +1027,16 @@ impl SetupApp {
             "WORKING_DIR" => 2,
             "REFLECTOR_ENABLED" => 3,
             "REFLECTOR_INTERVAL_MINS" => 4,
+            "MEMORY_TOKEN_BUDGET" => 5,
             "LLM_PROVIDER" => 10,
             "LLM_API_KEY" => 11,
             "LLM_MODEL" => 12,
             "LLM_BASE_URL" => 13,
+            "EMBEDDING_PROVIDER" => 14,
+            "EMBEDDING_API_KEY" => 15,
+            "EMBEDDING_BASE_URL" => 16,
+            "EMBEDDING_MODEL" => 17,
+            "EMBEDDING_DIM" => 18,
             "ENABLED_CHANNELS" => 20,
             "TELEGRAM_BOT_TOKEN" => 21,
             "BOT_USERNAME" => 22,
@@ -1278,6 +1378,57 @@ fn save_config_yaml(
         "reflector_interval_mins: {}\n",
         reflector_interval
     ));
+    let memory_token_budget = values
+        .get("MEMORY_TOKEN_BUDGET")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1500);
+    yaml.push_str(&format!("memory_token_budget: {}\n", memory_token_budget));
+
+    let embedding_provider = values
+        .get("EMBEDDING_PROVIDER")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let embedding_api_key = values
+        .get("EMBEDDING_API_KEY")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let embedding_base_url = values
+        .get("EMBEDDING_BASE_URL")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let embedding_model = values
+        .get("EMBEDDING_MODEL")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let embedding_dim = values
+        .get("EMBEDDING_DIM")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    if !embedding_provider.is_empty()
+        || !embedding_api_key.is_empty()
+        || !embedding_base_url.is_empty()
+        || !embedding_model.is_empty()
+        || !embedding_dim.is_empty()
+    {
+        yaml.push_str(
+            "\n# Optional embedding config for semantic memory retrieval (requires sqlite-vec feature)\n",
+        );
+        if !embedding_provider.is_empty() {
+            yaml.push_str(&format!("embedding_provider: \"{}\"\n", embedding_provider));
+        }
+        if !embedding_api_key.is_empty() {
+            yaml.push_str(&format!("embedding_api_key: \"{}\"\n", embedding_api_key));
+        }
+        if !embedding_base_url.is_empty() {
+            yaml.push_str(&format!("embedding_base_url: \"{}\"\n", embedding_base_url));
+        }
+        if !embedding_model.is_empty() {
+            yaml.push_str(&format!("embedding_model: \"{}\"\n", embedding_model));
+        }
+        if !embedding_dim.is_empty() {
+            yaml.push_str(&format!("embedding_dim: {}\n", embedding_dim));
+        }
+    }
 
     fs::write(path, yaml)?;
     Ok(backup)

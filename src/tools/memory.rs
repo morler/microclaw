@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 
+use crate::db::{call_blocking, Database};
 use crate::llm_types::ToolDefinition;
 
 use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
@@ -84,12 +86,14 @@ impl Tool for ReadMemoryTool {
 
 pub struct WriteMemoryTool {
     groups_dir: PathBuf,
+    db: Arc<Database>,
 }
 
 impl WriteMemoryTool {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, db: Arc<Database>) -> Self {
         WriteMemoryTool {
             groups_dir: PathBuf::from(data_dir).join("groups"),
+            db,
         }
     }
 }
@@ -135,7 +139,7 @@ impl Tool for WriteMemoryTool {
             None => return ToolResult::error("Missing 'content' parameter".into()),
         };
 
-        let path = match scope {
+        let (path, memory_chat_id) = match scope {
             "global" => {
                 if let Some(auth) = auth_context_from_input(&input) {
                     if !auth.is_control_chat() {
@@ -145,7 +149,7 @@ impl Tool for WriteMemoryTool {
                         ));
                     }
                 }
-                self.groups_dir.join("AGENTS.md")
+                (self.groups_dir.join("AGENTS.md"), None)
             }
             "chat" => {
                 let chat_id = match input.get("chat_id").and_then(|v| v.as_i64()) {
@@ -155,7 +159,10 @@ impl Tool for WriteMemoryTool {
                 if let Err(e) = authorize_chat_access(&input, chat_id) {
                     return ToolResult::error(e);
                 }
-                self.groups_dir.join(chat_id.to_string()).join("AGENTS.md")
+                (
+                    self.groups_dir.join(chat_id.to_string()).join("AGENTS.md"),
+                    Some(chat_id),
+                )
             }
             _ => return ToolResult::error("scope must be 'global' or 'chat'".into()),
         };
@@ -169,7 +176,28 @@ impl Tool for WriteMemoryTool {
         }
 
         match std::fs::write(&path, content) {
-            Ok(()) => ToolResult::success(format!("Memory saved to {} scope.", scope)),
+            Ok(()) => {
+                let mut memory_content = content.trim().to_string();
+                if !memory_content.is_empty() {
+                    if memory_content.len() > 300 {
+                        let cutoff = memory_content
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i <= 300)
+                            .last()
+                            .unwrap_or(300);
+                        memory_content.truncate(cutoff);
+                    }
+                    let chat_id = memory_chat_id;
+                    let _ = call_blocking(self.db.clone(), move |db| {
+                        db.insert_memory(chat_id, &memory_content, "KNOWLEDGE")
+                            .map(|_| ())
+                    })
+                    .await;
+                }
+
+                ToolResult::success(format!("Memory saved to {} scope.", scope))
+            }
             Err(e) => ToolResult::error(format!("Failed to write memory: {e}")),
         }
     }
@@ -179,9 +207,18 @@ impl Tool for WriteMemoryTool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
+
+    use crate::db::Database;
 
     fn test_dir() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("microclaw_memtool_{}", uuid::Uuid::new_v4()))
+    }
+
+    fn test_db(dir: &std::path::Path) -> Arc<Database> {
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        Arc::new(Database::new(runtime.to_str().unwrap()).unwrap())
     }
 
     #[tokio::test]
@@ -197,7 +234,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_and_read_memory_global() {
         let dir = test_dir();
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone());
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         let result = write_tool
@@ -209,6 +247,9 @@ mod tests {
         let result = read_tool.execute(json!({"scope": "global"})).await;
         assert!(!result.is_error);
         assert_eq!(result.content, "user prefers Rust");
+        let mems = db.get_all_memories_for_chat(None).unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].content, "user prefers Rust");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -216,7 +257,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_and_read_memory_chat() {
         let dir = test_dir();
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db.clone());
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         let result = write_tool
@@ -229,6 +271,9 @@ mod tests {
             .await;
         assert!(!result.is_error);
         assert_eq!(result.content, "chat 42 notes");
+        let mems = db.get_all_memories_for_chat(Some(42)).unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].content, "chat 42 notes");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -246,7 +291,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_memory_missing_scope() {
         let dir = test_dir();
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
         let result = tool.execute(json!({"content": "data"})).await;
         assert!(result.is_error);
         assert!(result.content.contains("Missing 'scope'"));
@@ -266,7 +312,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_memory_empty_file() {
         let dir = test_dir();
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
 
         write_tool
@@ -283,7 +330,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_memory_global_denied_for_non_control_chat() {
         let dir = test_dir();
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
         let result = tool
             .execute(json!({
                 "scope": "global",
@@ -302,7 +350,8 @@ mod tests {
     #[tokio::test]
     async fn test_write_memory_global_allowed_for_control_chat() {
         let dir = test_dir();
-        let tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
         let result = tool
             .execute(json!({
                 "scope": "global",
@@ -341,7 +390,8 @@ mod tests {
     #[tokio::test]
     async fn test_read_memory_chat_allowed_for_control_chat_cross_chat() {
         let dir = test_dir();
-        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap());
+        let db = test_db(&dir);
+        let write_tool = WriteMemoryTool::new(dir.to_str().unwrap(), db);
         let read_tool = ReadMemoryTool::new(dir.to_str().unwrap());
         write_tool
             .execute(json!({"scope": "chat", "chat_id": 200, "content": "chat200"}))

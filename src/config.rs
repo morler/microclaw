@@ -32,6 +32,9 @@ fn default_max_history_messages() -> usize {
 fn default_max_document_size_mb() -> u64 {
     100
 }
+fn default_memory_token_budget() -> usize {
+    1500
+}
 fn default_data_dir() -> String {
     "./microclaw.data".into()
 }
@@ -128,6 +131,8 @@ pub struct Config {
     pub max_history_messages: usize,
     #[serde(default = "default_max_document_size_mb")]
     pub max_document_size_mb: u64,
+    #[serde(default = "default_memory_token_budget")]
+    pub memory_token_budget: usize,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
     #[serde(default = "default_working_dir")]
@@ -172,6 +177,16 @@ pub struct Config {
     pub web_session_idle_ttl_seconds: u64,
     #[serde(default = "default_model_prices")]
     pub model_prices: Vec<ModelPrice>,
+    #[serde(default)]
+    pub embedding_provider: Option<String>,
+    #[serde(default)]
+    pub embedding_api_key: Option<String>,
+    #[serde(default)]
+    pub embedding_base_url: Option<String>,
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_dim: Option<usize>,
     #[serde(default = "default_reflector_enabled")]
     pub reflector_enabled: bool,
     #[serde(default = "default_reflector_interval_mins")]
@@ -276,6 +291,29 @@ impl Config {
                 self.web_auth_token = None;
             }
         }
+        if let Some(provider) = &self.embedding_provider {
+            let p = provider.trim().to_lowercase();
+            self.embedding_provider = if p.is_empty() { None } else { Some(p) };
+        }
+        if let Some(v) = &self.embedding_api_key {
+            if v.trim().is_empty() {
+                self.embedding_api_key = None;
+            }
+        }
+        if let Some(v) = &self.embedding_base_url {
+            if v.trim().is_empty() {
+                self.embedding_base_url = None;
+            }
+        }
+        if let Some(v) = &self.embedding_model {
+            let m = v.trim().to_string();
+            self.embedding_model = if m.is_empty() { None } else { Some(m) };
+        }
+        if let Some(v) = self.embedding_dim {
+            if v == 0 {
+                self.embedding_dim = None;
+            }
+        }
         if self.web_enabled && !is_local_web_host(&self.web_host) && self.web_auth_token.is_none() {
             return Err(MicroClawError::Config(
                 "web_auth_token is required when web_enabled=true and web_host is not local".into(),
@@ -298,6 +336,9 @@ impl Config {
         }
         if self.max_document_size_mb == 0 {
             self.max_document_size_mb = default_max_document_size_mb();
+        }
+        if self.memory_token_budget == 0 {
+            self.memory_token_budget = default_memory_token_budget();
         }
         for price in &mut self.model_prices {
             price.model = price.model.trim().to_string();
@@ -420,6 +461,7 @@ mod tests {
             max_tool_iterations: 100,
             max_history_messages: 50,
             max_document_size_mb: 100,
+            memory_token_budget: 1500,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
             working_dir_isolation: WorkingDirIsolation::Chat,
@@ -442,6 +484,11 @@ mod tests {
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
             model_prices: vec![],
+            embedding_provider: None,
+            embedding_api_key: None,
+            embedding_base_url: None,
+            embedding_model: None,
+            embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
         }
@@ -456,6 +503,7 @@ mod tests {
         assert_eq!(cloned.max_tool_iterations, 100);
         assert_eq!(cloned.max_history_messages, 50);
         assert_eq!(cloned.max_document_size_mb, 100);
+        assert_eq!(cloned.memory_token_budget, 1500);
         assert!(cloned.openai_api_key.is_none());
         assert_eq!(cloned.timezone, "UTC");
         assert!(cloned.allowed_groups.is_empty());
@@ -502,6 +550,7 @@ mod tests {
         assert_eq!(config.max_tool_iterations, 100);
         assert_eq!(config.data_dir, "./microclaw.data");
         assert_eq!(config.working_dir, "./tmp");
+        assert_eq!(config.memory_token_budget, 1500);
         assert!(matches!(
             config.working_dir_isolation,
             WorkingDirIsolation::Chat
@@ -516,6 +565,15 @@ mod tests {
         let mut config: Config = serde_yaml::from_str(yaml).unwrap();
         config.post_deserialize().unwrap();
         assert_eq!(config.working_dir, "./tmp");
+    }
+
+    #[test]
+    fn test_post_deserialize_zero_memory_budget_uses_default() {
+        let yaml =
+            "telegram_bot_token: tok\nbot_username: bot\napi_key: key\nmemory_token_budget: 0\n";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.post_deserialize().unwrap();
+        assert_eq!(config.memory_token_budget, 1500);
     }
 
     #[test]

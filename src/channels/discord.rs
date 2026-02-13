@@ -30,7 +30,17 @@ impl EventHandler for Handler {
         }
 
         let text = msg.content.clone();
-        let channel_id = msg.channel_id.get() as i64;
+        let external_channel_id = msg.channel_id.get();
+        let channel_id = {
+            let external_chat_id = external_channel_id.to_string();
+            let chat_type = "discord".to_string();
+            let title = format!("discord-{external_channel_id}");
+            call_blocking(self.app_state.db.clone(), move |db| {
+                db.resolve_or_create_chat_id("discord", &external_chat_id, Some(&title), &chat_type)
+            })
+            .await
+            .unwrap_or(external_channel_id as i64)
+        };
         let sender_name = msg.author.name.clone();
 
         // Check allowed channels (empty = all)
@@ -39,7 +49,7 @@ impl EventHandler for Handler {
                 .app_state
                 .config
                 .discord_allowed_channels
-                .contains(&(channel_id as u64))
+                .contains(&external_channel_id)
         {
             return;
         }
@@ -128,7 +138,7 @@ impl EventHandler for Handler {
         }
 
         // Store the chat and message
-        let title = format!("discord-{}", msg.channel_id.get());
+        let title = format!("discord-{external_channel_id}");
         let _ = call_blocking(self.app_state.db.clone(), move |db| {
             db.upsert_chat(channel_id, Some(&title), "discord")
         })

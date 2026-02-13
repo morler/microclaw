@@ -3,6 +3,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
 use crate::db::{call_blocking, Database, StoredMessage};
+use crate::embedding::EmbeddingProvider;
 use crate::llm_types::{ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock};
 use crate::runtime::AppState;
 use crate::text::floor_char_boundary;
@@ -203,7 +204,14 @@ pub(crate) async fn process_with_agent_impl(
 
     // Build system prompt
     let file_memory = state.memory.build_memory_context(chat_id);
-    let db_memory = build_db_memory_context(&state.db, chat_id, &query).await;
+    let db_memory = build_db_memory_context(
+        &state.db,
+        &state.embedding,
+        chat_id,
+        &query,
+        state.config.memory_token_budget,
+    )
+    .await;
     let memory_context = format!("{}{}", file_memory, db_memory);
     let skills_catalog = state.skills.build_skills_catalog();
     let system_prompt = build_system_prompt(
@@ -516,39 +524,69 @@ pub(crate) async fn load_messages_from_db(
     ))
 }
 
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x4E00..=0x9FFF
+            | 0x3400..=0x4DBF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0xF900..=0xFAFF
+    )
+}
+
+fn tokenize_for_relevance(text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+
+    for token in text
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| w.len() > 1)
+    {
+        out.insert(token);
+    }
+
+    let cjk_chars: Vec<char> = text.chars().filter(|c| is_cjk(*c)).collect();
+    if cjk_chars.len() >= 2 {
+        for pair in cjk_chars.windows(2) {
+            let gram: String = pair.iter().collect();
+            out.insert(gram);
+        }
+    } else if cjk_chars.len() == 1 {
+        out.insert(cjk_chars[0].to_string());
+    }
+
+    out
+}
+
 fn score_relevance(content: &str, query: &str) -> usize {
     if query.is_empty() {
         return 0;
     }
-    let query_words: std::collections::HashSet<String> = query
-        .split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-                .to_lowercase()
-        })
-        .filter(|w| w.len() > 2)
-        .collect();
-    if query_words.is_empty() {
+    let query_tokens = tokenize_for_relevance(query);
+    if query_tokens.is_empty() {
         return 0;
     }
-    content
-        .split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-                .to_lowercase()
-        })
-        .filter(|w| query_words.contains(w))
+    let content_tokens = tokenize_for_relevance(content);
+    content_tokens
+        .iter()
+        .filter(|t| query_tokens.contains(*t))
         .count()
 }
 
 pub(crate) async fn build_db_memory_context(
     db: &std::sync::Arc<Database>,
+    embedding: &Option<std::sync::Arc<dyn EmbeddingProvider>>,
     chat_id: i64,
     query: &str,
+    token_budget: usize,
 ) -> String {
     let memories = match call_blocking(db.clone(), move |db| {
         db.get_memories_for_context(chat_id, 100)
@@ -563,17 +601,70 @@ pub(crate) async fn build_db_memory_context(
         return String::new();
     }
 
-    // Score by relevance to current query; preserve recency order for ties
-    let mut scored: Vec<(usize, &crate::db::Memory)> = memories
-        .iter()
-        .map(|m| (score_relevance(&m.content, query), m))
-        .collect();
-    if !query.is_empty() {
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut ordered: Vec<&crate::db::Memory> = Vec::new();
+    #[cfg(feature = "sqlite-vec")]
+    let mut retrieval_method = "keyword";
+    #[cfg(not(feature = "sqlite-vec"))]
+    let retrieval_method = "keyword";
+
+    #[cfg(feature = "sqlite-vec")]
+    {
+        if let Some(provider) = embedding {
+            if !query.trim().is_empty() {
+                if let Ok(query_vec) = provider.embed(query).await {
+                    let knn_result = call_blocking(db.clone(), move |db| {
+                        db.knn_memories(chat_id, &query_vec, 20)
+                    })
+                    .await;
+                    if let Ok(knn_rows) = knn_result {
+                        let by_id: std::collections::HashMap<i64, &crate::db::Memory> =
+                            memories.iter().map(|m| (m.id, m)).collect();
+                        for (id, _) in knn_rows {
+                            if let Some(mem) = by_id.get(&id) {
+                                ordered.push(*mem);
+                            }
+                        }
+                        if !ordered.is_empty() {
+                            retrieval_method = "knn";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "sqlite-vec"))]
+    {
+        let _ = embedding;
+    }
+
+    if ordered.is_empty() {
+        // Score by relevance to current query; preserve recency for ties.
+        let mut scored: Vec<(usize, usize, &crate::db::Memory)> = memories
+            .iter()
+            .enumerate()
+            .map(|(idx, m)| (score_relevance(&m.content, query), idx, m))
+            .collect();
+        if !query.is_empty() {
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        }
+        ordered = scored.into_iter().map(|(_, _, m)| m).collect();
     }
 
     let mut out = String::from("<structured_memories>\n");
-    for (_, m) in scored.into_iter().take(20) {
+    let mut used_tokens = 0usize;
+    let mut omitted = 0usize;
+
+    let budget = token_budget.max(1);
+
+    for (idx, m) in ordered.iter().enumerate() {
+        let estimated_tokens = (m.content.len() / 4) + 10;
+        if used_tokens + estimated_tokens > budget {
+            omitted = ordered.len().saturating_sub(idx);
+            break;
+        }
+
+        used_tokens += estimated_tokens;
         let scope = if m.chat_id.is_none() {
             "global"
         } else {
@@ -581,7 +672,18 @@ pub(crate) async fn build_db_memory_context(
         };
         out.push_str(&format!("[{}] [{}] {}\n", m.category, scope, m.content));
     }
+    if omitted > 0 {
+        out.push_str(&format!("(+{omitted} memories omitted)\n"));
+    }
     out.push_str("</structured_memories>\n");
+    info!(
+        "Memory injection: chat {} -> {} memories, method={}, tokens_est={}, omitted={}",
+        chat_id,
+        ordered.len().saturating_sub(omitted),
+        retrieval_method,
+        used_tokens,
+        omitted
+    );
     out
 }
 
@@ -938,4 +1040,71 @@ async fn compact_messages(
     }
 
     compacted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_db_memory_context;
+    use crate::db::Database;
+    use std::sync::Arc;
+
+    fn test_db() -> (Arc<Database>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("mc_agent_engine_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::new(dir.to_str().unwrap()).unwrap());
+        (db, dir)
+    }
+
+    #[tokio::test]
+    async fn test_build_db_memory_context_respects_token_budget() {
+        let (db, dir) = test_db();
+        db.insert_memory(Some(100), "short memory one", "PROFILE")
+            .unwrap();
+        db.insert_memory(Some(100), "short memory two", "KNOWLEDGE")
+            .unwrap();
+        db.insert_memory(Some(100), "short memory three", "EVENT")
+            .unwrap();
+
+        let context = build_db_memory_context(&db, &None, 100, "short", 20).await;
+        assert!(context.contains("<structured_memories>"));
+        assert!(context.contains("(+"));
+        assert!(context.contains("memories omitted"));
+        assert!(context.contains("</structured_memories>"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_build_db_memory_context_large_budget_keeps_all() {
+        let (db, dir) = test_db();
+        db.insert_memory(Some(100), "user likes rust", "PROFILE")
+            .unwrap();
+        db.insert_memory(Some(100), "user likes coffee", "PROFILE")
+            .unwrap();
+
+        let context = build_db_memory_context(&db, &None, 100, "likes", 10_000).await;
+        assert!(context.contains("user likes rust"));
+        assert!(context.contains("user likes coffee"));
+        assert!(!context.contains("memories omitted"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_build_db_memory_context_cjk_relevance() {
+        let (db, dir) = test_db();
+        db.insert_memory(Some(100), "用户喜欢咖啡和编程", "PROFILE")
+            .unwrap();
+        db.insert_memory(Some(100), "User prefers Rust and tea", "PROFILE")
+            .unwrap();
+
+        let context = build_db_memory_context(&db, &None, 100, "喜欢 咖啡", 10_000).await;
+        let first_line = context
+            .lines()
+            .find(|line| line.starts_with('['))
+            .unwrap_or("");
+        assert!(first_line.contains("用户喜欢咖啡和编程"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

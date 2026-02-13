@@ -6,6 +6,7 @@ pub mod codex_auth;
 pub mod config;
 pub mod db;
 pub mod doctor;
+pub mod embedding;
 pub mod error;
 pub mod gateway;
 pub mod llm;
