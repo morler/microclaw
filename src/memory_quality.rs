@@ -83,6 +83,33 @@ pub fn extract_explicit_memory_command(text: &str) -> Option<String> {
     None
 }
 
+pub fn memory_topic_key(content: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("port") && (lower.contains("db") || lower.contains("database")) {
+        return "db_port".to_string();
+    }
+    if lower.contains("deadline") || lower.contains("due date") {
+        return "deadline".to_string();
+    }
+    if lower.contains("timezone") || lower.contains("time zone") {
+        return "timezone".to_string();
+    }
+    if lower.contains("server ip") || lower.contains("ip address") {
+        return "server_ip".to_string();
+    }
+    lower
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|w| !w.is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +132,18 @@ mod tests {
         assert!(memory_quality_ok("User prefers Rust and PostgreSQL."));
         assert!(!memory_quality_ok("hello"));
         assert!(!memory_quality_ok("maybe user likes tea"));
+    }
+
+    #[test]
+    fn test_memory_topic_key() {
+        assert_eq!(
+            memory_topic_key("Production database port is 5433"),
+            "db_port".to_string()
+        );
+        assert_eq!(
+            memory_topic_key("Release deadline is Friday"),
+            "deadline".to_string()
+        );
     }
 
     #[test]

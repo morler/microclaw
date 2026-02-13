@@ -25,7 +25,7 @@
  存入 SQLite --> 加载聊天历史 + 记忆
                     |
                     v
-              Claude API（带工具）
+              选定的 LLM API（带工具）
                     |
                stop_reason?
               /            \
@@ -36,10 +36,10 @@
                          |
                          v
                    将结果反馈给
-                   Claude（循环）
+                   模型（循环）
 ```
 
-每条消息触发一个 **智能体循环**：Claude 可以调用工具、检查结果、再调用更多工具，经过多步推理后再回复。默认每次请求最多 100 次迭代。
+每条消息触发一个 **智能体循环**：模型可以调用工具、检查结果、再调用更多工具，经过多步推理后再回复。默认每次请求最多 100 次迭代。
 
 ## 博客文章
 
@@ -48,7 +48,7 @@
 ## 功能特性
 
 - **智能体工具调用** -- bash 命令、文件读写编辑、glob 搜索、正则 grep、持久化记忆
-- **会话恢复** -- 完整对话状态（包括工具交互）持久化保存；Claude 跨调用记住工具调用
+- **会话恢复** -- 完整对话状态（包括工具交互）持久化保存；模型可跨调用延续工具调用状态
 - **上下文压缩** -- 会话过长时自动总结旧消息，保持在上下文限制内
 - **子代理** -- 将独立子任务委派给有限制工具集的并行代理
 - **技能系统** -- 可扩展的技能系统（兼容 [Anthropic Skills](https://github.com/anthropics/skills) 标准）；技能从 `microclaw.data/skills/` 自动发现，按需激活
@@ -101,7 +101,7 @@ microclaw.data/runtime/groups/
         AGENTS.md             # 每聊天记忆
 ```
 
-记忆在每次请求时加载到 Claude 的系统提示中。Claude 可以通过工具读写记忆 -- 告诉它"记住我喜欢用 Python"，它就会跨会话保存。
+记忆在每次请求时加载到系统提示中。模型可以通过工具读写记忆 -- 告诉它"记住我喜欢用 Python"，它就会跨会话保存。
 
 另外，MicroClaw 也会把结构化记忆写入 SQLite（`memories` 表）：
 - `write_memory` 会同时写入文件记忆与结构化记忆
@@ -154,8 +154,8 @@ microclaw.data/skills/
 
 **工作方式：**
 1. 技能元数据（名称 + 描述）始终在系统提示中（每个技能约 100 token）
-2. 当 Claude 判断某技能相关时，调用 `activate_skill` 加载完整指令
-3. Claude 按技能指令完成任务
+2. 当模型判断某技能相关时，调用 `activate_skill` 加载完整指令
+3. 模型按技能指令完成任务
 
 **内置技能：** pdf、docx、xlsx、pptx、skill-creator、apple-notes、apple-reminders、apple-calendar、weather
 
@@ -461,7 +461,7 @@ microclaw gateway uninstall
 | `data_dir` | 否 | `./microclaw.data` | 数据根目录（运行时数据在 `data_dir/runtime`，技能在 `data_dir/skills`） |
 | `working_dir` | 否 | `./tmp` | 工具默认工作目录；`bash/read_file/write_file/edit_file/glob/grep` 的相对路径都以此为基准 |
 | `working_dir_isolation` | 否 | `chat` | 工具工作目录隔离模式：`shared` 使用 `working_dir/shared`，`chat` 使用 `working_dir/chat/<channel>/<chat_id>` |
-| `max_tokens` | 否 | `8192` | 每次 Claude 回复的最大 token |
+| `max_tokens` | 否 | `8192` | 每次模型回复的最大 token |
 | `max_tool_iterations` | 否 | `100` | 每条消息的最大工具循环次数 |
 | `max_document_size_mb` | 否 | `100` | Telegram 入站文档允许的最大大小（MB）；超过会拒绝并提示 |
 | `memory_token_budget` | 否 | `1500` | 注入结构化记忆时使用的估算 token 预算 |
@@ -543,7 +543,7 @@ Bot: [激活 pdf 技能，按照专业指令完成转换]
 MicroClaw 的核心智能体循环是渠道无关的。新增平台时，重点是实现适配器层：
 
 1. 将平台入站事件映射到统一输入（`chat_id`、sender、chat type、content blocks）。
-2. 复用共享的 `process_with_claude` 流程，不要新增平台专属 agent loop。
+2. 复用共享的 `process_with_agent` 流程，不要新增平台专属 agent loop。
 3. 实现平台出站发送（文本与附件），并处理平台长度限制。
 4. 定义群组/频道场景下的触发规则（例如 @ 提及才回复）。
 5. 保持会话键稳定，确保会话恢复、上下文压缩、记忆机制可复用。

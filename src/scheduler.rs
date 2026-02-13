@@ -174,7 +174,11 @@ fn jaccard_similar(a: &str, b: &str, threshold: f64) -> bool {
     intersection as f64 / union as f64 >= threshold
 }
 
-fn should_merge_duplicate(existing: &Memory, incoming_content: &str, incoming_category: &str) -> bool {
+fn should_merge_duplicate(
+    existing: &Memory,
+    incoming_content: &str,
+    incoming_category: &str,
+) -> bool {
     if existing.is_archived {
         return true;
     }
@@ -465,6 +469,11 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         existing.iter().map(|m| (m.id, m.content.clone())).collect();
     let existing_by_id: std::collections::HashMap<i64, &Memory> =
         existing.iter().map(|m| (m.id, m)).collect();
+    let mut topic_latest: std::collections::HashMap<String, i64> = existing
+        .iter()
+        .filter(|m| !m.is_archived)
+        .map(|m| (memory_quality::memory_topic_key(&m.content), m.id))
+        .collect();
     for item in &extracted {
         let content = match item.get("content").and_then(|v| v.as_str()) {
             Some(s) => s,
@@ -510,6 +519,39 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
             }
         }
 
+        let topic_key = memory_quality::memory_topic_key(&content);
+        if let Some(prev_id) = topic_latest.get(&topic_key).copied() {
+            if let Some(prev) = existing_by_id.get(&prev_id) {
+                if !prev.content.eq_ignore_ascii_case(&content)
+                    && jaccard_similar(&prev.content, &content, 0.85) == false
+                {
+                    let new_content = content.to_string();
+                    let new_category = category.to_string();
+                    if let Ok(new_id) = call_blocking(state.db.clone(), move |db| {
+                        db.supersede_memory(
+                            prev_id,
+                            &new_content,
+                            &new_category,
+                            "reflector_conflict",
+                            0.74,
+                            Some("topic_conflict"),
+                        )
+                    })
+                    .await
+                    {
+                        updated += 1;
+                        #[cfg(feature = "sqlite-vec")]
+                        {
+                            let _ = upsert_memory_embedding(state, new_id, &content).await;
+                        }
+                        topic_latest.insert(topic_key, new_id);
+                        seen_contents.push((new_id, content));
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Dedup: semantic KNN when available, otherwise lexical Jaccard.
         let duplicate_id = {
             #[cfg(feature = "sqlite-vec")]
@@ -522,8 +564,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
                         .await
                         .ok()
                         .and_then(|rows| rows.first().copied());
-                        nearest
-                            .and_then(|(id, dist)| if dist < 0.15 { Some(id) } else { None })
+                        nearest.and_then(|(id, dist)| if dist < 0.15 { Some(id) } else { None })
                     } else {
                         seen_contents
                             .iter()
@@ -596,6 +637,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
             #[cfg(not(feature = "sqlite-vec"))]
             let _ = memory_id;
             seen_contents.push((memory_id, content));
+            topic_latest.insert(topic_key, memory_id);
         }
     }
 

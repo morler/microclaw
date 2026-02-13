@@ -91,6 +91,16 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `todo_read` | Read the current task/plan list for a chat |
 | `todo_write` | Create or update the task/plan list for a chat |
 
+Generated reference (source-of-truth, anti-drift):
+- `docs/generated/tools.md`
+- `docs/generated/config-defaults.md`
+- `docs/generated/provider-matrix.md`
+
+Regenerate with:
+```sh
+node scripts/generate_docs_artifacts.mjs
+```
+
 ## Memory
 
 MicroClaw maintains persistent memory via `AGENTS.md` files:

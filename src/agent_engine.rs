@@ -152,7 +152,10 @@ async fn maybe_handle_explicit_memory_command(
         return Ok(None);
     }
 
-    let latest_user = call_blocking(state.db.clone(), move |db| db.get_recent_messages(chat_id, 10)).await?;
+    let latest_user = call_blocking(state.db.clone(), move |db| {
+        db.get_recent_messages(chat_id, 10)
+    })
+    .await?;
     let Some(last_user_text) = latest_user
         .into_iter()
         .rev()
@@ -162,7 +165,8 @@ async fn maybe_handle_explicit_memory_command(
         return Ok(None);
     };
 
-    let Some(explicit_content) = memory_quality::extract_explicit_memory_command(&last_user_text) else {
+    let Some(explicit_content) = memory_quality::extract_explicit_memory_command(&last_user_text)
+    else {
         return Ok(None);
     };
     if !memory_quality::memory_quality_ok(&explicit_content) {
@@ -171,7 +175,11 @@ async fn maybe_handle_explicit_memory_command(
         ));
     }
 
-    let existing = call_blocking(state.db.clone(), move |db| db.get_all_memories_for_chat(Some(chat_id))).await?;
+    let existing = call_blocking(state.db.clone(), move |db| {
+        db.get_all_memories_for_chat(Some(chat_id))
+    })
+    .await?;
+    let explicit_topic = memory_quality::memory_topic_key(&explicit_content);
     if let Some(dup) = existing.iter().find(|m| {
         !m.is_archived
             && (m.content.eq_ignore_ascii_case(&explicit_content)
@@ -180,16 +188,54 @@ async fn maybe_handle_explicit_memory_command(
         let memory_id = dup.id;
         let content_for_update = explicit_content.clone();
         let _ = call_blocking(state.db.clone(), move |db| {
-            db.update_memory_with_metadata(memory_id, &content_for_update, "KNOWLEDGE", 0.95, "explicit")
-                .map(|_| ())
+            db.update_memory_with_metadata(
+                memory_id,
+                &content_for_update,
+                "KNOWLEDGE",
+                0.95,
+                "explicit",
+            )
+            .map(|_| ())
         })
         .await;
-        return Ok(Some(format!("Noted. Updated memory #{memory_id}: {explicit_content}")));
+        return Ok(Some(format!(
+            "Noted. Updated memory #{memory_id}: {explicit_content}"
+        )));
+    }
+
+    if let Some(conflict) = existing.iter().find(|m| {
+        !m.is_archived
+            && m.category == "KNOWLEDGE"
+            && memory_quality::memory_topic_key(&m.content) == explicit_topic
+            && !m.content.eq_ignore_ascii_case(&explicit_content)
+    }) {
+        let from_id = conflict.id;
+        let new_content = explicit_content.clone();
+        let superseded_id = call_blocking(state.db.clone(), move |db| {
+            db.supersede_memory(
+                from_id,
+                &new_content,
+                "KNOWLEDGE",
+                "explicit_conflict",
+                0.95,
+                Some("explicit_topic_conflict"),
+            )
+        })
+        .await?;
+        return Ok(Some(format!(
+            "Noted. Superseded memory #{from_id} with #{superseded_id}: {explicit_content}"
+        )));
     }
 
     let content_for_insert = explicit_content.clone();
     let inserted_id = call_blocking(state.db.clone(), move |db| {
-        db.insert_memory_with_metadata(Some(chat_id), &content_for_insert, "KNOWLEDGE", "explicit", 0.95)
+        db.insert_memory_with_metadata(
+            Some(chat_id),
+            &content_for_insert,
+            "KNOWLEDGE",
+            "explicit",
+            0.95,
+        )
     })
     .await?;
 
@@ -223,7 +269,8 @@ pub(crate) async fn process_with_agent_impl(
     let chat_id = context.chat_id;
 
     if let Some(reply) =
-        maybe_handle_explicit_memory_command(state, chat_id, override_prompt, image_data.clone()).await?
+        maybe_handle_explicit_memory_command(state, chat_id, override_prompt, image_data.clone())
+            .await?
     {
         return Ok(reply);
     }
@@ -785,11 +832,7 @@ pub(crate) async fn build_db_memory_context(
     .await;
     info!(
         "Memory injection: chat {} -> {} memories, method={}, tokens_est={}, omitted={}",
-        chat_id,
-        selected_count,
-        retrieval_method,
-        used_tokens,
-        omitted
+        chat_id, selected_count, retrieval_method, used_tokens, omitted
     );
     out
 }
@@ -1151,15 +1194,117 @@ async fn compact_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::build_db_memory_context;
-    use crate::db::Database;
+    use super::{build_db_memory_context, process_with_agent, AgentRequestContext};
+    use crate::config::{Config, WorkingDirIsolation};
+    use crate::db::{Database, StoredMessage};
+    use crate::error::MicroClawError;
+    use crate::llm::LlmProvider;
+    use crate::llm_types::{Message, MessagesResponse, ResponseContentBlock, ToolDefinition};
+    use crate::memory::MemoryManager;
+    use crate::runtime::AppState;
+    use crate::skills::SkillManager;
+    use crate::tools::ToolRegistry;
     use std::sync::Arc;
+    use teloxide::prelude::Bot;
+
+    struct DummyLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DummyLlm {
+        async fn send_message(
+            &self,
+            _system: &str,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+        ) -> Result<MessagesResponse, MicroClawError> {
+            Ok(MessagesResponse {
+                content: vec![ResponseContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+                usage: None,
+            })
+        }
+    }
 
     fn test_db() -> (Arc<Database>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("mc_agent_engine_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Arc::new(Database::new(dir.to_str().unwrap()).unwrap());
         (db, dir)
+    }
+
+    fn test_state_with_base_dir(base_dir: &std::path::Path) -> Arc<AppState> {
+        let runtime_dir = base_dir.join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let mut cfg = Config {
+            telegram_bot_token: "tok".into(),
+            bot_username: "bot".into(),
+            llm_provider: "anthropic".into(),
+            api_key: "key".into(),
+            model: "claude-sonnet-4-5-20250929".into(),
+            llm_base_url: None,
+            max_tokens: 8192,
+            max_tool_iterations: 100,
+            max_history_messages: 50,
+            max_document_size_mb: 100,
+            memory_token_budget: 1500,
+            data_dir: base_dir.to_string_lossy().to_string(),
+            working_dir: base_dir.join("tmp").to_string_lossy().to_string(),
+            working_dir_isolation: WorkingDirIsolation::Shared,
+            openai_api_key: None,
+            timezone: "UTC".into(),
+            allowed_groups: vec![],
+            control_chat_ids: vec![],
+            max_session_messages: 40,
+            compact_keep_recent: 20,
+            discord_bot_token: None,
+            discord_allowed_channels: vec![],
+            show_thinking: false,
+            web_enabled: true,
+            web_host: "127.0.0.1".into(),
+            web_port: 3900,
+            web_auth_token: None,
+            web_max_inflight_per_session: 2,
+            web_max_requests_per_window: 8,
+            web_rate_window_seconds: 10,
+            web_run_history_limit: 512,
+            web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
+            embedding_provider: None,
+            embedding_api_key: None,
+            embedding_base_url: None,
+            embedding_model: None,
+            embedding_dim: None,
+            reflector_enabled: true,
+            reflector_interval_mins: 15,
+        };
+        cfg.data_dir = base_dir.to_string_lossy().to_string();
+        cfg.working_dir = base_dir.join("tmp").to_string_lossy().to_string();
+        let db = Arc::new(Database::new(runtime_dir.to_str().unwrap()).unwrap());
+        let bot = Bot::new("123456:TEST_TOKEN");
+        Arc::new(AppState {
+            config: cfg.clone(),
+            telegram_bot: Some(bot.clone()),
+            db: db.clone(),
+            memory: MemoryManager::new(runtime_dir.to_str().unwrap()),
+            skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
+            llm: Box::new(DummyLlm),
+            embedding: None,
+            tools: ToolRegistry::new(&cfg, Some(bot), db),
+        })
+    }
+
+    fn store_user_message(db: &Database, chat_id: i64, text: &str) {
+        let msg = StoredMessage {
+            id: format!("msg-{}", uuid::Uuid::new_v4()),
+            chat_id,
+            sender_name: "tester".to_string(),
+            content: text.to_string(),
+            is_from_bot: false,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        db.store_message(&msg).unwrap();
     }
 
     #[tokio::test]
@@ -1213,5 +1358,151 @@ mod tests {
         assert!(first_line.contains("用户喜欢咖啡和编程"));
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_memory_fast_path_works_across_channels_and_recall_after_restart() {
+        let cases = vec![
+            (
+                "web",
+                "chat-ext-web-1",
+                "web",
+                "Remember that production database port is 5433",
+            ),
+            (
+                "telegram",
+                "1001",
+                "private",
+                "Remember that production database port is 5433",
+            ),
+            (
+                "discord",
+                "discord-room-a",
+                "discord",
+                "Remember that production database port is 5433",
+            ),
+        ];
+
+        for (caller_channel, external_chat_id, chat_type, message) in cases {
+            let base_dir = std::env::temp_dir()
+                .join(format!("mc_agent_cross_channel_{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&base_dir).unwrap();
+            let state = test_state_with_base_dir(&base_dir);
+            let chat_id = state
+                .db
+                .resolve_or_create_chat_id(
+                    caller_channel,
+                    external_chat_id,
+                    Some("test-chat"),
+                    chat_type,
+                )
+                .unwrap();
+
+            store_user_message(&state.db, chat_id, message);
+            let reply = process_with_agent(
+                &state,
+                AgentRequestContext {
+                    caller_channel,
+                    chat_id,
+                    chat_type,
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                reply.contains("Saved memory #"),
+                "expected explicit fast-path save reply, got: {reply}"
+            );
+
+            let mems = state.db.get_all_memories_for_chat(Some(chat_id)).unwrap();
+            assert_eq!(mems.iter().filter(|m| !m.is_archived).count(), 1);
+            drop(state);
+
+            // Restart simulation: new AppState reading the same runtime data.
+            let restarted = test_state_with_base_dir(&base_dir);
+            let recalled =
+                build_db_memory_context(&restarted.db, &None, chat_id, "database port", 1500).await;
+            assert!(
+                recalled.contains("production database port is 5433"),
+                "expected memory recall after restart, got: {recalled}"
+            );
+
+            drop(restarted);
+            let _ = std::fs::remove_dir_all(&base_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_explicit_memory_topic_conflict_supersedes_old_value() {
+        let base_dir =
+            std::env::temp_dir().join(format!("mc_agent_topic_conflict_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base_dir).unwrap();
+        let state = test_state_with_base_dir(&base_dir);
+        let chat_id = state
+            .db
+            .resolve_or_create_chat_id("web", "topic-conflict-chat", Some("topic"), "web")
+            .unwrap();
+
+        store_user_message(
+            &state.db,
+            chat_id,
+            "Remember that production database port is 5433",
+        );
+        let first = process_with_agent(
+            &state,
+            AgentRequestContext {
+                caller_channel: "web",
+                chat_id,
+                chat_type: "web",
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            first.contains("Saved memory #"),
+            "unexpected first reply: {first}"
+        );
+
+        store_user_message(
+            &state.db,
+            chat_id,
+            "Remember that db port for primary cluster is 6432",
+        );
+        let second = process_with_agent(
+            &state,
+            AgentRequestContext {
+                caller_channel: "web",
+                chat_id,
+                chat_type: "web",
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            second.contains("Superseded memory #"),
+            "expected supersede reply, got: {second}"
+        );
+
+        let all = state.db.get_all_memories_for_chat(Some(chat_id)).unwrap();
+        let active: Vec<_> = all.iter().filter(|m| !m.is_archived).collect();
+        let archived: Vec<_> = all.iter().filter(|m| m.is_archived).collect();
+        assert_eq!(active.len(), 1);
+        assert!(
+            active[0].content.contains("6432"),
+            "active memory should keep latest value"
+        );
+        assert!(
+            archived.iter().any(|m| m.content.contains("5433")),
+            "old value should be archived after supersede"
+        );
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 }

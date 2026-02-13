@@ -180,7 +180,9 @@ impl Tool for WriteMemoryTool {
             Ok(()) => {
                 let memory_content = content.trim().to_string();
                 if !memory_content.is_empty() {
-                    if let Some(normalized) = memory_quality::normalize_memory_content(&memory_content, 180) {
+                    if let Some(normalized) =
+                        memory_quality::normalize_memory_content(&memory_content, 180)
+                    {
                         if memory_quality::memory_quality_ok(&normalized) {
                             let chat_id = memory_chat_id;
                             let _ = call_blocking(self.db.clone(), move |db| {
