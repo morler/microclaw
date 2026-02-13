@@ -125,12 +125,18 @@ const DEFAULT_CONFIG_VALUES = {
   max_tokens: 8192,
   max_tool_iterations: 100,
   max_document_size_mb: 100,
+  memory_token_budget: 1500,
   show_thinking: false,
   web_enabled: true,
   web_host: '127.0.0.1',
   web_port: 10961,
   reflector_enabled: true,
   reflector_interval_mins: 15,
+  embedding_provider: '',
+  embedding_api_key: '',
+  embedding_base_url: '',
+  embedding_model: '',
+  embedding_dim: '',
 }
 
 const UI_THEME_OPTIONS: { key: UiTheme; label: string; color: string }[] = [
@@ -943,12 +949,18 @@ function App() {
       max_tokens: Number(data.config?.max_tokens ?? 8192),
       max_tool_iterations: Number(data.config?.max_tool_iterations ?? 100),
       max_document_size_mb: Number(data.config?.max_document_size_mb ?? DEFAULT_CONFIG_VALUES.max_document_size_mb),
+      memory_token_budget: Number(data.config?.memory_token_budget ?? DEFAULT_CONFIG_VALUES.memory_token_budget),
       show_thinking: Boolean(data.config?.show_thinking),
       web_enabled: Boolean(data.config?.web_enabled),
       web_host: String(data.config?.web_host || '127.0.0.1'),
       web_port: Number(data.config?.web_port ?? 10961),
       reflector_enabled: data.config?.reflector_enabled !== false,
       reflector_interval_mins: Number(data.config?.reflector_interval_mins ?? DEFAULT_CONFIG_VALUES.reflector_interval_mins),
+      embedding_provider: String(data.config?.embedding_provider || ''),
+      embedding_api_key: '',
+      embedding_base_url: String(data.config?.embedding_base_url || ''),
+      embedding_model: String(data.config?.embedding_model || ''),
+      embedding_dim: String(data.config?.embedding_dim || ''),
     })
     setConfigOpen(true)
   }
@@ -1013,6 +1025,9 @@ function App() {
         case 'max_document_size_mb':
           next.max_document_size_mb = DEFAULT_CONFIG_VALUES.max_document_size_mb
           break
+        case 'memory_token_budget':
+          next.memory_token_budget = DEFAULT_CONFIG_VALUES.memory_token_budget
+          break
         case 'show_thinking':
           next.show_thinking = DEFAULT_CONFIG_VALUES.show_thinking
           break
@@ -1030,6 +1045,21 @@ function App() {
           break
         case 'reflector_interval_mins':
           next.reflector_interval_mins = DEFAULT_CONFIG_VALUES.reflector_interval_mins
+          break
+        case 'embedding_provider':
+          next.embedding_provider = DEFAULT_CONFIG_VALUES.embedding_provider
+          break
+        case 'embedding_api_key':
+          next.embedding_api_key = DEFAULT_CONFIG_VALUES.embedding_api_key
+          break
+        case 'embedding_base_url':
+          next.embedding_base_url = DEFAULT_CONFIG_VALUES.embedding_base_url
+          break
+        case 'embedding_model':
+          next.embedding_model = DEFAULT_CONFIG_VALUES.embedding_model
+          break
+        case 'embedding_dim':
+          next.embedding_dim = DEFAULT_CONFIG_VALUES.embedding_dim
           break
         default:
           break
@@ -1063,12 +1093,21 @@ function App() {
         max_document_size_mb: Number(
           configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb,
         ),
+        memory_token_budget: Number(
+          configDraft.memory_token_budget || DEFAULT_CONFIG_VALUES.memory_token_budget,
+        ),
         show_thinking: Boolean(configDraft.show_thinking),
         web_enabled: Boolean(configDraft.web_enabled),
         web_host: String(configDraft.web_host || '127.0.0.1'),
         web_port: Number(configDraft.web_port || 10961),
         reflector_enabled: configDraft.reflector_enabled !== false,
         reflector_interval_mins: Number(configDraft.reflector_interval_mins || DEFAULT_CONFIG_VALUES.reflector_interval_mins),
+        embedding_provider: String(configDraft.embedding_provider || '').trim() || null,
+        embedding_base_url: String(configDraft.embedding_base_url || '').trim() || null,
+        embedding_model: String(configDraft.embedding_model || '').trim() || null,
+        embedding_dim: String(configDraft.embedding_dim || '').trim()
+          ? Number(configDraft.embedding_dim)
+          : null,
       }
       if (String(configDraft.llm_provider || '').trim().toLowerCase() === 'custom') {
         payload.llm_base_url = String(configDraft.llm_base_url || '').trim() || null
@@ -1087,6 +1126,9 @@ function App() {
 
       const discordToken = String(configDraft.discord_bot_token || '').trim()
       if (discordToken) payload.discord_bot_token = discordToken
+
+      const embeddingApiKey = String(configDraft.embedding_api_key || '').trim()
+      if (embeddingApiKey) payload.embedding_api_key = embeddingApiKey
 
       await api('/api/config', { method: 'PUT', body: JSON.stringify(payload) })
       setSaveStatus('Saved. Restart microclaw to apply changes.')
@@ -1262,7 +1304,7 @@ function App() {
                           Runtime defaults used across all channels.
                         </Text>
                         <Text size="1" color="gray" className="mt-2 block">working_dir_isolation: chat = isolated workspace per chat; shared = one shared workspace.</Text>
-                        <Text size="1" color="gray" className="mt-1 block">max_tokens / max_tool_iterations / max_document_size_mb control response budget and tool loop safety.</Text>
+                        <Text size="1" color="gray" className="mt-1 block">max_tokens / max_tool_iterations / max_document_size_mb / memory_token_budget control response budget and tool loop safety.</Text>
                         <div className="mt-4 space-y-3">
                           <ConfigFieldCard label="working_dir_isolation" description={<>Use <code>chat</code> for per-chat isolation, or <code>shared</code> for one shared workspace.</>}>
                             <select
@@ -1298,6 +1340,15 @@ function App() {
                               value={String(configDraft.max_document_size_mb || DEFAULT_CONFIG_VALUES.max_document_size_mb)}
                               onChange={(e) => setConfigField('max_document_size_mb', e.target.value)}
                               placeholder="100"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="memory_token_budget" description={<>Estimated token budget for injecting structured memories into the system prompt.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              type="number"
+                              value={String(configDraft.memory_token_budget || DEFAULT_CONFIG_VALUES.memory_token_budget)}
+                              onChange={(e) => setConfigField('memory_token_budget', e.target.value)}
+                              placeholder="1500"
                             />
                           </ConfigFieldCard>
                         </div>
@@ -1404,6 +1455,47 @@ function App() {
                               value={String(configDraft.api_key || '')}
                               onChange={(e) => setConfigField('api_key', e.target.value)}
                               placeholder={currentProvider === 'openai-codex' ? '(ignored for openai-codex)' : 'sk-...'}
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="embedding_provider" description={<>Optional runtime embedding provider for semantic memory (requires sqlite-vec build): <code>openai</code> or <code>ollama</code>.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.embedding_provider || '')}
+                              onChange={(e) => setConfigField('embedding_provider', e.target.value)}
+                              placeholder="openai"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="embedding_api_key" description={<>Optional embedding API key. Leave blank to keep unchanged.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.embedding_api_key || '')}
+                              onChange={(e) => setConfigField('embedding_api_key', e.target.value)}
+                              placeholder="sk-..."
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="embedding_base_url" description={<>Optional embedding base URL override.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.embedding_base_url || '')}
+                              onChange={(e) => setConfigField('embedding_base_url', e.target.value)}
+                              placeholder="https://api.openai.com/v1"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="embedding_model" description={<>Optional embedding model id.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              value={String(configDraft.embedding_model || '')}
+                              onChange={(e) => setConfigField('embedding_model', e.target.value)}
+                              placeholder="text-embedding-3-small"
+                            />
+                          </ConfigFieldCard>
+                          <ConfigFieldCard label="embedding_dim" description={<>Optional embedding vector dimension.</>}>
+                            <TextField.Root
+                              className="mt-2"
+                              type="number"
+                              value={String(configDraft.embedding_dim || '')}
+                              onChange={(e) => setConfigField('embedding_dim', e.target.value)}
+                              placeholder="1536"
                             />
                           </ConfigFieldCard>
                         </div>

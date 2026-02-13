@@ -173,6 +173,45 @@ fn jaccard_similar(a: &str, b: &str, threshold: f64) -> bool {
     intersection as f64 / union as f64 >= threshold
 }
 
+#[cfg(feature = "sqlite-vec")]
+async fn upsert_memory_embedding(
+    state: &Arc<AppState>,
+    memory_id: i64,
+    content: &str,
+) -> Result<(), ()> {
+    let provider = match &state.embedding {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let model_name = provider.model().to_string();
+    let embedding = provider.embed(content).await.map_err(|_| ())?;
+    call_blocking(state.db.clone(), move |db| {
+        db.upsert_memory_vec(memory_id, &embedding)?;
+        db.update_memory_embedding_model(memory_id, &model_name)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| ())
+}
+
+#[cfg(feature = "sqlite-vec")]
+async fn backfill_embeddings(state: &Arc<AppState>) {
+    if state.embedding.is_none() {
+        return;
+    }
+    let pending = match call_blocking(state.db.clone(), move |db| {
+        db.get_memories_without_embedding(None, 50)
+    })
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+    for mem in pending {
+        let _ = upsert_memory_embedding(state, mem.id, &mem.content).await;
+    }
+}
+
 pub fn spawn_reflector(state: Arc<AppState>) {
     if !state.config.reflector_enabled {
         info!("Reflector disabled by config");
@@ -192,6 +231,9 @@ pub fn spawn_reflector(state: Arc<AppState>) {
 }
 
 async fn run_reflector(state: &Arc<AppState>) {
+    #[cfg(feature = "sqlite-vec")]
+    backfill_embeddings(state).await;
+
     let lookback_secs = (state.config.reflector_interval_mins * 2 * 60) as i64;
     let since = (Utc::now() - chrono::Duration::seconds(lookback_secs)).to_rfc3339();
 
@@ -213,28 +255,47 @@ async fn run_reflector(state: &Arc<AppState>) {
 }
 
 async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
-    // 1. Get recent messages
-    let messages = match call_blocking(state.db.clone(), move |db| {
-        db.get_recent_messages(chat_id, 30)
-    })
-    .await
-    {
-        Ok(m) => m,
-        Err(_) => return,
+    // 1. Get message cursor for incremental reflection
+    let cursor =
+        match call_blocking(state.db.clone(), move |db| db.get_reflector_cursor(chat_id)).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+    // 2. Load messages incrementally when cursor exists; otherwise bootstrap with recent context
+    let messages = if let Some(since) = cursor {
+        match call_blocking(state.db.clone(), move |db| {
+            db.get_messages_since(chat_id, &since, 200)
+        })
+        .await
+        {
+            Ok(m) => m,
+            Err(_) => return,
+        }
+    } else {
+        match call_blocking(state.db.clone(), move |db| {
+            db.get_recent_messages(chat_id, 30)
+        })
+        .await
+        {
+            Ok(m) => m,
+            Err(_) => return,
+        }
     };
 
     if messages.is_empty() {
         return;
     }
+    let latest_message_ts = messages.last().map(|m| m.timestamp.clone());
 
-    // 2. Format conversation for the LLM
+    // 3. Format conversation for the LLM
     let conversation = messages
         .iter()
         .map(|m| format!("[{}]: {}", m.sender_name, m.content))
         .collect::<Vec<_>>()
         .join("\n");
 
-    // 3. Load existing memories (needed for dedup and to pass to LLM for merge)
+    // 4. Load existing memories (needed for dedup and to pass to LLM for merge)
     let existing = match call_blocking(state.db.clone(), move |db| {
         db.get_all_memories_for_chat(Some(chat_id))
     })
@@ -255,7 +316,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         format!("\n\nExisting memories (use supersedes_id to replace stale ones):\n{lines}")
     };
 
-    // 4. Call LLM directly (no tools, no session)
+    // 5. Call LLM directly (no tools, no session)
     let user_msg = Message {
         role: "user".into(),
         content: MessageContent::Text(format!(
@@ -274,7 +335,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         }
     };
 
-    // 5. Extract text from response
+    // 6. Extract text from response
     let text = response
         .content
         .iter()
@@ -288,7 +349,7 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         .collect::<Vec<_>>()
         .join("");
 
-    // 6. Parse JSON array
+    // 7. Parse JSON array
     let extracted: Vec<serde_json::Value> = match serde_json::from_str(text.trim()) {
         Ok(v) => v,
         Err(_) => {
@@ -309,12 +370,28 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
     };
 
     if extracted.is_empty() {
+        if let Some(ts) = latest_message_ts {
+            let _ = call_blocking(state.db.clone(), move |db| {
+                db.set_reflector_cursor(chat_id, &ts)
+            })
+            .await;
+        }
         return;
     }
 
-    // 7. Insert new memories or update superseded ones
+    // 8. Insert new memories or update superseded ones
     let mut inserted = 0usize;
     let mut updated = 0usize;
+    let mut skipped = 0usize;
+    #[cfg(feature = "sqlite-vec")]
+    let dedup_method = if state.embedding.is_some() {
+        "semantic"
+    } else {
+        "jaccard"
+    };
+    #[cfg(not(feature = "sqlite-vec"))]
+    let dedup_method = "jaccard";
+    let mut seen_contents: Vec<String> = existing.iter().map(|m| m.content.clone()).collect();
     for item in &extracted {
         let content = match item.get("content").and_then(|v| v.as_str()) {
             Some(s) => s,
@@ -323,7 +400,11 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
         let category = item
             .get("category")
             .and_then(|v| v.as_str())
-            .unwrap_or("KNOWLEDGE");
+            .unwrap_or("KNOWLEDGE")
+            .to_ascii_uppercase();
+        if !matches!(category.as_str(), "PROFILE" | "KNOWLEDGE" | "EVENT") {
+            continue;
+        }
         let content = content.trim();
         if content.is_empty() || content.len() > 300 {
             continue;
@@ -335,40 +416,91 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
             if existing.iter().any(|m| m.id == sid) {
                 let content = content.to_string();
                 let category = category.to_string();
+                let db_content = content.clone();
                 if call_blocking(state.db.clone(), move |db| {
-                    db.update_memory_content(sid, &content, &category)
+                    db.update_memory_content(sid, &db_content, &category)
                 })
                 .await
                 .is_ok()
                 {
                     updated += 1;
+                    #[cfg(feature = "sqlite-vec")]
+                    {
+                        let _ = upsert_memory_embedding(state, sid, &content).await;
+                    }
+                    seen_contents.push(content);
                 }
                 continue;
             }
         }
 
-        // Skip if too similar to any existing memory (dedup)
-        if existing
-            .iter()
-            .any(|m| jaccard_similar(&m.content, content, 0.5))
-        {
+        // Dedup: semantic KNN when available, otherwise lexical Jaccard.
+        let is_dup = {
+            #[cfg(feature = "sqlite-vec")]
+            {
+                if let Some(provider) = &state.embedding {
+                    if let Ok(query_vec) = provider.embed(content).await {
+                        let nearest = call_blocking(state.db.clone(), move |db| {
+                            db.knn_memories(chat_id, &query_vec, 1)
+                        })
+                        .await
+                        .ok()
+                        .and_then(|rows| rows.first().copied());
+                        nearest.map(|(_, dist)| dist < 0.15).unwrap_or(false)
+                    } else {
+                        seen_contents
+                            .iter()
+                            .any(|existing| jaccard_similar(existing, content, 0.5))
+                    }
+                } else {
+                    seen_contents
+                        .iter()
+                        .any(|existing| jaccard_similar(existing, content, 0.5))
+                }
+            }
+            #[cfg(not(feature = "sqlite-vec"))]
+            {
+                seen_contents
+                    .iter()
+                    .any(|existing| jaccard_similar(existing, content, 0.5))
+            }
+        };
+        if is_dup {
+            skipped += 1;
             continue;
         }
 
         let content = content.to_string();
+        let db_content = content.clone();
         let category = category.to_string();
-        if call_blocking(state.db.clone(), move |db| {
-            db.insert_memory(Some(chat_id), &content, &category)
+        let inserted_id = call_blocking(state.db.clone(), move |db| {
+            db.insert_memory(Some(chat_id), &db_content, &category)
         })
         .await
-        .is_ok()
-        {
+        .ok();
+        if let Some(memory_id) = inserted_id {
             inserted += 1;
+            #[cfg(feature = "sqlite-vec")]
+            {
+                let _ = upsert_memory_embedding(state, memory_id, &content).await;
+            }
+            #[cfg(not(feature = "sqlite-vec"))]
+            let _ = memory_id;
+            seen_contents.push(content);
         }
     }
 
+    if let Some(ts) = latest_message_ts {
+        let _ = call_blocking(state.db.clone(), move |db| {
+            db.set_reflector_cursor(chat_id, &ts)
+        })
+        .await;
+    }
+
     if inserted > 0 || updated > 0 {
-        info!("Reflector: chat {chat_id} → {inserted} new, {updated} updated memories");
+        info!(
+            "Reflector: chat {chat_id} -> {inserted} new ({dedup_method} dedup), {updated} updated, {skipped} skipped"
+        );
     }
 }
 

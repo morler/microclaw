@@ -51,7 +51,23 @@ async fn handle_message(
     msg: teloxide::types::Message,
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let chat_id = msg.chat.id.0;
+    let raw_chat_id = msg.chat.id.0;
+    let (runtime_chat_type, db_chat_type) = match msg.chat.kind {
+        teloxide::types::ChatKind::Private(_) => ("private", "telegram_private"),
+        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+            kind: teloxide::types::PublicChatKind::Group,
+            ..
+        }) => ("group", "telegram_group"),
+        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+            kind: teloxide::types::PublicChatKind::Supergroup(_),
+            ..
+        }) => ("group", "telegram_supergroup"),
+        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
+            kind: teloxide::types::PublicChatKind::Channel(_),
+            ..
+        }) => ("group", "telegram_channel"),
+    };
+    let chat_title = msg.chat.title().map(|t| t.to_string());
 
     // Extract content: text, photo, or voice
     let mut text = msg.text().unwrap_or("").to_string();
@@ -60,7 +76,19 @@ async fn handle_message(
 
     // Handle /reset command — clear session
     if text.trim() == "/reset" {
-        let chat_id = msg.chat.id.0;
+        let external_chat_id = raw_chat_id.to_string();
+        let chat_title_for_lookup = chat_title.clone();
+        let chat_type_for_lookup = db_chat_type.to_string();
+        let chat_id = call_blocking(state.db.clone(), move |db| {
+            db.resolve_or_create_chat_id(
+                "telegram",
+                &external_chat_id,
+                chat_title_for_lookup.as_deref(),
+                &chat_type_for_lookup,
+            )
+        })
+        .await
+        .unwrap_or(raw_chat_id);
         let _ = call_blocking(state.db.clone(), move |db| db.delete_session(chat_id)).await;
         let _ = bot.send_message(msg.chat.id, "Session cleared.").await;
         return Ok(());
@@ -75,7 +103,19 @@ async fn handle_message(
 
     // Handle /archive command — archive current session to markdown
     if text.trim() == "/archive" {
-        let chat_id = msg.chat.id.0;
+        let external_chat_id = raw_chat_id.to_string();
+        let chat_title_for_lookup = chat_title.clone();
+        let chat_type_for_lookup = db_chat_type.to_string();
+        let chat_id = call_blocking(state.db.clone(), move |db| {
+            db.resolve_or_create_chat_id(
+                "telegram",
+                &external_chat_id,
+                chat_title_for_lookup.as_deref(),
+                &chat_type_for_lookup,
+            )
+        })
+        .await
+        .unwrap_or(raw_chat_id);
         if let Ok(Some((json, _))) =
             call_blocking(state.db.clone(), move |db| db.load_session(chat_id)).await
         {
@@ -103,6 +143,19 @@ async fn handle_message(
 
     // Handle /usage command — token usage summary
     if text.trim() == "/usage" {
+        let external_chat_id = raw_chat_id.to_string();
+        let chat_title_for_lookup = chat_title.clone();
+        let chat_type_for_lookup = db_chat_type.to_string();
+        let chat_id = call_blocking(state.db.clone(), move |db| {
+            db.resolve_or_create_chat_id(
+                "telegram",
+                &external_chat_id,
+                chat_title_for_lookup.as_deref(),
+                &chat_type_for_lookup,
+            )
+        })
+        .await
+        .unwrap_or(raw_chat_id);
         match build_usage_report(state.db.clone(), &state.config, chat_id).await {
             Ok(response) => {
                 let _ = bot.send_message(msg.chat.id, response).await;
@@ -177,7 +230,7 @@ async fn handle_message(
                 let dir = Path::new(&state.config.working_dir)
                     .join("uploads")
                     .join("telegram")
-                    .join(chat_id.to_string());
+                    .join(raw_chat_id.to_string());
                 if let Err(e) = std::fs::create_dir_all(&dir) {
                     error!("Failed to create upload dir {}: {e}", dir.display());
                 } else {
@@ -279,29 +332,24 @@ async fn handle_message(
         .map(|u| u.username.clone().unwrap_or_else(|| u.first_name.clone()))
         .unwrap_or_else(|| "Unknown".into());
 
-    let (runtime_chat_type, db_chat_type) = match msg.chat.kind {
-        teloxide::types::ChatKind::Private(_) => ("private", "telegram_private"),
-        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-            kind: teloxide::types::PublicChatKind::Group,
-            ..
-        }) => ("group", "telegram_group"),
-        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-            kind: teloxide::types::PublicChatKind::Supergroup(_),
-            ..
-        }) => ("group", "telegram_supergroup"),
-        teloxide::types::ChatKind::Public(teloxide::types::ChatPublic {
-            kind: teloxide::types::PublicChatKind::Channel(_),
-            ..
-        }) => ("group", "telegram_channel"),
-    };
-
-    let chat_title = msg.chat.title().map(|t| t.to_string());
-
     // Check group allowlist
     if (db_chat_type == "telegram_group" || db_chat_type == "telegram_supergroup")
         && !state.config.allowed_groups.is_empty()
-        && !state.config.allowed_groups.contains(&chat_id)
+        && !state.config.allowed_groups.contains(&raw_chat_id)
     {
+        let external_chat_id = raw_chat_id.to_string();
+        let chat_title_for_lookup = chat_title.clone();
+        let chat_type_for_lookup = db_chat_type.to_string();
+        let chat_id = call_blocking(state.db.clone(), move |db| {
+            db.resolve_or_create_chat_id(
+                "telegram",
+                &external_chat_id,
+                chat_title_for_lookup.as_deref(),
+                &chat_type_for_lookup,
+            )
+        })
+        .await
+        .unwrap_or(raw_chat_id);
         // Store message but don't process
         let chat_title_owned = chat_title.clone();
         let chat_type_owned = db_chat_type.to_string();
@@ -338,6 +386,20 @@ async fn handle_message(
         let _ = call_blocking(state.db.clone(), move |db| db.store_message(&stored)).await;
         return Ok(());
     }
+
+    let external_chat_id = raw_chat_id.to_string();
+    let chat_title_for_lookup = chat_title.clone();
+    let chat_type_for_lookup = db_chat_type.to_string();
+    let chat_id = call_blocking(state.db.clone(), move |db| {
+        db.resolve_or_create_chat_id(
+            "telegram",
+            &external_chat_id,
+            chat_title_for_lookup.as_deref(),
+            &chat_type_for_lookup,
+        )
+    })
+    .await
+    .unwrap_or(raw_chat_id);
 
     // Store the chat and message
     let chat_title_owned = chat_title.clone();

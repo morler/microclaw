@@ -60,7 +60,7 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 - **Mid-conversation messaging** -- the agent can send intermediate messages before its final response
 - **Mention catch-up (Telegram groups)** -- when mentioned in a Telegram group, the bot reads all messages since its last reply (not just the last N)
 - **Continuous typing indicator** -- typing indicator stays active for the full duration of processing
-- **Persistent memory** -- CLAUDE.md files at global and per-chat scopes, loaded into every request
+- **Persistent memory** -- AGENTS.md files at global and per-chat scopes, loaded into every request
 - **Message splitting** -- long responses are automatically split at newline boundaries to fit channel limits (Telegram 4096 / Discord 2000)
 
 ## Tools
@@ -73,8 +73,8 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 | `edit_file` | Find-and-replace editing with uniqueness validation |
 | `glob` | Find files by pattern (`**/*.rs`, `src/**/*.ts`) |
 | `grep` | Regex search across file contents |
-| `read_memory` | Read persistent CLAUDE.md memory (global or per-chat) |
-| `write_memory` | Write persistent CLAUDE.md memory |
+| `read_memory` | Read persistent AGENTS.md memory (global or per-chat) |
+| `write_memory` | Write persistent AGENTS.md memory |
 | `web_search` | Search the web via DuckDuckGo (returns titles, URLs, snippets) |
 | `web_fetch` | Fetch a URL and return plain text (HTML stripped, max 20KB) |
 | `send_message` | Send mid-conversation messages; supports attachments for Telegram/Discord via `attachment_path` + optional `caption` |
@@ -93,16 +93,45 @@ For a deeper dive into the architecture and design decisions, read: **[Building 
 
 ## Memory
 
-MicroClaw maintains persistent memory via `CLAUDE.md` files, inspired by Claude Code's project memory:
+MicroClaw maintains persistent memory via `AGENTS.md` files:
 
 ```
 microclaw.data/runtime/groups/
-    CLAUDE.md                 # Global memory (shared across all chats)
+    AGENTS.md                 # Global memory (shared across all chats)
     {chat_id}/
-        CLAUDE.md             # Per-chat memory
+        AGENTS.md             # Per-chat memory
 ```
 
 Memory is loaded into the system prompt on every request. The model can read and update memory through tools -- tell it to "remember that I prefer Python" and it will persist across sessions.
+
+MicroClaw also keeps structured memory rows in SQLite (`memories` table):
+- `write_memory` persists to file memory and structured memory
+- Background reflector extracts durable facts incrementally and deduplicates
+
+When built with `--features sqlite-vec` and embedding config is set, structured-memory retrieval and dedup use semantic KNN. Otherwise, it falls back to keyword relevance + Jaccard dedup.
+
+### Chat Identity Mapping
+
+MicroClaw now stores a channel-scoped identity for chats:
+
+- `internal chat_id`: SQLite primary key used by sessions/messages/tasks
+- `channel + external_chat_id`: source chat identity from Telegram/Discord/Web
+
+This avoids collisions when different channels can have the same numeric id. Legacy rows are migrated automatically on startup.
+
+Useful SQL for debugging:
+
+```sql
+SELECT chat_id, channel, external_chat_id, chat_type, chat_title
+FROM chats
+ORDER BY last_message_time DESC
+LIMIT 50;
+
+SELECT id, chat_id, chat_channel, external_chat_id, category, content, embedding_model
+FROM memories
+ORDER BY id DESC
+LIMIT 50;
+```
 
 ## Skills
 
@@ -288,6 +317,24 @@ cargo build --release
 cp target/release/microclaw /usr/local/bin/
 ```
 
+Optional semantic-memory build (sqlite-vec disabled by default):
+
+```sh
+cargo build --release --features sqlite-vec
+```
+
+First-time sqlite-vec quickstart (3 commands):
+
+```sh
+cargo run --features sqlite-vec -- setup
+cargo run --features sqlite-vec -- start
+sqlite3 microclaw.data/runtime/microclaw.db "SELECT id, chat_id, chat_channel, external_chat_id, category, embedding_model FROM memories ORDER BY id DESC LIMIT 20;"
+```
+
+In `setup`, set:
+- `embedding_provider` = `openai` or `ollama`
+- provider credentials/base URL/model as needed
+
 ## Local Web UI (cross-channel history)
 
 When `web_enabled: true`, MicroClaw serves a local Web UI (default `http://127.0.0.1:10961`).
@@ -408,7 +455,14 @@ data_dir: "./microclaw.data"
 working_dir: "./tmp"
 working_dir_isolation: "chat" # optional; defaults to "chat" if omitted
 max_document_size_mb: 100
+memory_token_budget: 1500
 timezone: "UTC"
+# optional semantic memory runtime config (requires --features sqlite-vec build)
+# embedding_provider: "openai"   # openai | ollama
+# embedding_api_key: "sk-..."
+# embedding_base_url: "https://api.openai.com/v1"
+# embedding_model: "text-embedding-3-small"
+# embedding_dim: 1536
 ```
 
 ### 4. Run
@@ -461,10 +515,16 @@ All configuration is via `microclaw.config.yaml`:
 | `max_tokens` | No | `8192` | Max tokens per model response |
 | `max_tool_iterations` | No | `100` | Max tool-use loop iterations per message |
 | `max_document_size_mb` | No | `100` | Maximum allowed size for inbound Telegram documents; larger files are rejected with a hint message |
+| `memory_token_budget` | No | `1500` | Estimated token budget for injecting structured memories into prompt context |
 | `max_history_messages` | No | `50` | Number of recent messages sent as context |
 | `control_chat_ids` | No | `[]` | Chat IDs that can perform cross-chat actions (send_message/schedule/export/memory global/todo) |
 | `max_session_messages` | No | `40` | Message count threshold that triggers context compaction |
 | `compact_keep_recent` | No | `20` | Number of recent messages to keep verbatim during compaction |
+| `embedding_provider` | No | unset | Runtime embedding provider (`openai` or `ollama`) for semantic memory retrieval; requires `--features sqlite-vec` build |
+| `embedding_api_key` | No | unset | API key for embedding provider (optional for `ollama`) |
+| `embedding_base_url` | No | provider default | Optional base URL override for embedding provider |
+| `embedding_model` | No | provider default | Embedding model ID |
+| `embedding_dim` | No | provider default | Embedding vector dimension for sqlite-vec index initialization |
 
 `*` At least one channel must be enabled: `telegram_bot_token`, `discord_bot_token`, or `web_enabled: true`.
 
@@ -548,7 +608,7 @@ src/
     llm.rs               # LLM provider abstraction (Anthropic + OpenAI-compatible)
     llm_types.rs         # Canonical message/tool schema shared across LLM adapters
     db.rs                # SQLite: messages, chats, scheduled_tasks, sessions
-    memory.rs            # CLAUDE.md memory system
+    memory.rs            # AGENTS.md memory system
     skills.rs            # Agent skills system (discovery, activation)
     scheduler.rs         # Background task scheduler (60s polling loop)
     tools/

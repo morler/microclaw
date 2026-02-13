@@ -59,7 +59,7 @@
 - **会话中发消息** -- 智能体可以在最终回复前发送中间进度消息
 - **提及追赶（Telegram 群）** -- 在 Telegram 群里被 @ 时，机器人会读取上次回复以来的所有消息
 - **持续输入指示** -- 处理期间持续显示"正在输入"状态
-- **持久化记忆** -- 全局和每个聊天的 CLAUDE.md 文件，每次请求都会加载
+- **持久化记忆** -- 全局和每个聊天的 AGENTS.md 文件，每次请求都会加载
 - **消息分割** -- 长回复自动在换行处分割，适配不同平台长度限制（Telegram 4096 / Discord 2000）
 
 ## 工具列表
@@ -72,8 +72,8 @@
 | `edit_file` | 查找替换编辑，带唯一性验证 |
 | `glob` | 按模式查找文件（`**/*.rs`、`src/**/*.ts`） |
 | `grep` | 正则搜索文件内容 |
-| `read_memory` | 读取持久化 CLAUDE.md 记忆（全局或每聊天） |
-| `write_memory` | 写入持久化 CLAUDE.md 记忆 |
+| `read_memory` | 读取持久化 AGENTS.md 记忆（全局或每聊天） |
+| `write_memory` | 写入持久化 AGENTS.md 记忆 |
 | `web_search` | 通过 DuckDuckGo 搜索（返回标题、URL、摘要） |
 | `web_fetch` | 抓取 URL 并返回纯文本（去 HTML，最大 20KB） |
 | `send_message` | 会话中发送消息；支持 Telegram/Discord 附件发送（`attachment_path` + 可选 `caption`） |
@@ -92,16 +92,45 @@
 
 ## 记忆系统
 
-MicroClaw 通过 `CLAUDE.md` 文件维护持久化记忆，灵感来自 Claude Code 的项目记忆：
+MicroClaw 通过 `AGENTS.md` 文件维护持久化记忆：
 
 ```
 microclaw.data/runtime/groups/
-    CLAUDE.md                 # 全局记忆（所有聊天共享）
+    AGENTS.md                 # 全局记忆（所有聊天共享）
     {chat_id}/
-        CLAUDE.md             # 每聊天记忆
+        AGENTS.md             # 每聊天记忆
 ```
 
 记忆在每次请求时加载到 Claude 的系统提示中。Claude 可以通过工具读写记忆 -- 告诉它"记住我喜欢用 Python"，它就会跨会话保存。
+
+另外，MicroClaw 也会把结构化记忆写入 SQLite（`memories` 表）：
+- `write_memory` 会同时写入文件记忆与结构化记忆
+- 后台 Reflector 会增量提取长期事实并去重
+
+当使用 `--features sqlite-vec` 构建且配置了 embedding 参数时，结构化记忆的检索和去重会使用语义 KNN；否则自动回退为关键词排序 + Jaccard 去重。
+
+### 聊天身份映射（channel + chat id）
+
+MicroClaw 现在会保存“按渠道隔离”的聊天身份：
+
+- `internal chat_id`：SQLite 内部主键（用于 sessions/messages/tasks）
+- `channel + external_chat_id`：来自 Telegram/Discord/Web 的源聊天身份
+
+这样可避免不同渠道使用相同数字 id 时发生冲突。历史数据会在启动时自动迁移补齐。
+
+排查时建议用以下 SQL：
+
+```sql
+SELECT chat_id, channel, external_chat_id, chat_type, chat_title
+FROM chats
+ORDER BY last_message_time DESC
+LIMIT 50;
+
+SELECT id, chat_id, chat_channel, external_chat_id, category, content, embedding_model
+FROM memories
+ORDER BY id DESC
+LIMIT 50;
+```
 
 ## 技能系统
 
@@ -231,6 +260,24 @@ cargo build --release
 cp target/release/microclaw /usr/local/bin/
 ```
 
+可选语义记忆构建（默认关闭 sqlite-vec）：
+
+```sh
+cargo build --release --features sqlite-vec
+```
+
+首次启用 sqlite-vec（最短 3 条命令）：
+
+```sh
+cargo run --features sqlite-vec -- setup
+cargo run --features sqlite-vec -- start
+sqlite3 microclaw.data/runtime/microclaw.db "SELECT id, chat_id, chat_channel, external_chat_id, category, embedding_model FROM memories ORDER BY id DESC LIMIT 20;"
+```
+
+在 `setup` 里至少设置：
+- `embedding_provider` = `openai` 或 `ollama`
+- 对应 provider 的 key/base URL/model
+
 ## 本地 Web UI（跨渠道历史）
 
 当 `web_enabled: true` 时，MicroClaw 会启动本地 Web UI（默认 `http://127.0.0.1:10961`）。
@@ -349,7 +396,14 @@ model: "claude-sonnet-4-20250514"
 data_dir: "./microclaw.data"
 working_dir: "./tmp"
 max_document_size_mb: 100
+memory_token_budget: 1500
 timezone: "UTC"
+# 可选语义记忆配置（需使用 --features sqlite-vec 构建）
+# embedding_provider: "openai"   # openai | ollama
+# embedding_api_key: "sk-..."
+# embedding_base_url: "https://api.openai.com/v1"
+# embedding_model: "text-embedding-3-small"
+# embedding_dim: 1536
 ```
 
 ### 4. 运行
@@ -402,10 +456,16 @@ microclaw gateway uninstall
 | `max_tokens` | 否 | `8192` | 每次 Claude 回复的最大 token |
 | `max_tool_iterations` | 否 | `100` | 每条消息的最大工具循环次数 |
 | `max_document_size_mb` | 否 | `100` | Telegram 入站文档允许的最大大小（MB）；超过会拒绝并提示 |
+| `memory_token_budget` | 否 | `1500` | 注入结构化记忆时使用的估算 token 预算 |
 | `max_history_messages` | 否 | `50` | 作为上下文发送的历史消息数 |
 | `control_chat_ids` | 否 | `[]` | 可跨聊天执行操作的 chat_id 列表（send_message/定时/导出/全局记忆/todo） |
 | `max_session_messages` | 否 | `40` | 触发上下文压缩的消息数阈值 |
 | `compact_keep_recent` | 否 | `20` | 压缩时保留的最近消息数 |
+| `embedding_provider` | 否 | 未设置 | 语义记忆 embedding provider（`openai` 或 `ollama`）；需要 `--features sqlite-vec` 构建 |
+| `embedding_api_key` | 否 | 未设置 | embedding provider API key（`ollama` 可留空） |
+| `embedding_base_url` | 否 | provider 默认 | embedding provider base URL 覆盖 |
+| `embedding_model` | 否 | provider 默认 | embedding 模型 ID |
+| `embedding_dim` | 否 | provider 默认 | sqlite-vec 索引使用的向量维度 |
 
 `*` 需要至少启用一个渠道：`telegram_bot_token`、`discord_bot_token`，或 `web_enabled: true`。
 

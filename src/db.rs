@@ -1,5 +1,8 @@
+use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection};
 use std::path::Path;
+#[cfg(feature = "sqlite-vec")]
+use std::sync::Once;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MicroClawError;
@@ -7,6 +10,16 @@ use crate::error::MicroClawError;
 pub struct Database {
     conn: Mutex<Connection>,
 }
+
+#[cfg(feature = "sqlite-vec")]
+static SQLITE_VEC_AUTOEXT_INIT: Once = Once::new();
+
+#[cfg(feature = "sqlite-vec")]
+type SqliteAutoExtensionFn = unsafe extern "C" fn(
+    *mut rusqlite::ffi::sqlite3,
+    *mut *mut i8,
+    *const rusqlite::ffi::sqlite3_api_routines,
+) -> i32;
 
 pub async fn call_blocking<T, F>(db: std::sync::Arc<Database>, f: F) -> Result<T, MicroClawError>
 where
@@ -76,6 +89,7 @@ pub struct Memory {
     pub category: String,
     pub created_at: String,
     pub updated_at: String,
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +106,99 @@ pub struct ScheduledTask {
     pub created_at: String,
 }
 
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MicroClawError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in rows {
+        if col? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_memory_schema(conn: &Connection) -> Result<(), MicroClawError> {
+    if !table_has_column(conn, "memories", "embedding_model")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN embedding_model TEXT", [])?;
+    }
+    if !table_has_column(conn, "memories", "chat_channel")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN chat_channel TEXT", [])?;
+    }
+    if !table_has_column(conn, "memories", "external_chat_id")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN external_chat_id TEXT", [])?;
+    }
+    let chats_has_channel = table_has_column(conn, "chats", "channel")?;
+    let chats_has_external = table_has_column(conn, "chats", "external_chat_id")?;
+    if chats_has_channel && chats_has_external {
+        conn.execute(
+            "UPDATE memories
+             SET chat_channel = (
+                     SELECT c.channel FROM chats c WHERE c.chat_id = memories.chat_id
+                 ),
+                 external_chat_id = (
+                     SELECT c.external_chat_id FROM chats c WHERE c.chat_id = memories.chat_id
+                 )
+             WHERE chat_id IS NOT NULL
+               AND (
+                   chat_channel IS NULL
+                   OR trim(chat_channel) = ''
+                   OR external_chat_id IS NULL
+                   OR trim(external_chat_id) = ''
+               )",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn infer_channel_from_chat_type(chat_type: &str) -> &'static str {
+    if chat_type.starts_with("telegram_")
+        || matches!(chat_type, "private" | "group" | "supergroup" | "channel")
+    {
+        "telegram"
+    } else if chat_type == "discord" {
+        "discord"
+    } else if chat_type == "web" {
+        "web"
+    } else {
+        "unknown"
+    }
+}
+
+fn ensure_chat_identity_schema(conn: &Connection) -> Result<(), MicroClawError> {
+    if !table_has_column(conn, "chats", "channel")? {
+        conn.execute("ALTER TABLE chats ADD COLUMN channel TEXT", [])?;
+    }
+    if !table_has_column(conn, "chats", "external_chat_id")? {
+        conn.execute("ALTER TABLE chats ADD COLUMN external_chat_id TEXT", [])?;
+    }
+
+    conn.execute(
+        "UPDATE chats
+         SET channel = CASE
+             WHEN chat_type LIKE 'telegram_%' THEN 'telegram'
+             WHEN chat_type IN ('private', 'group', 'supergroup', 'channel') THEN 'telegram'
+             WHEN chat_type = 'discord' THEN 'discord'
+             WHEN chat_type = 'web' THEN 'web'
+             ELSE COALESCE(channel, 'unknown')
+         END
+         WHERE channel IS NULL OR trim(channel) = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE chats
+         SET external_chat_id = CAST(chat_id AS TEXT)
+         WHERE external_chat_id IS NULL OR trim(external_chat_id) = ''",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chats_channel_external
+         ON chats(channel, external_chat_id)",
+        [],
+    )?;
+    Ok(())
+}
+
 impl Database {
     fn lock_conn(&self) -> MutexGuard<'_, Connection> {
         match self.conn.lock() {
@@ -104,6 +211,13 @@ impl Database {
         let db_path = Path::new(data_dir).join("microclaw.db");
         std::fs::create_dir_all(data_dir)?;
 
+        #[cfg(feature = "sqlite-vec")]
+        SQLITE_VEC_AUTOEXT_INIT.call_once(|| unsafe {
+            let init_fn_ptr = sqlite_vec::sqlite3_vec_init as *const ();
+            let init_fn: SqliteAutoExtensionFn = std::mem::transmute(init_fn_ptr);
+            rusqlite::ffi::sqlite3_auto_extension(Some(init_fn));
+        });
+
         let conn = Connection::open(db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
@@ -112,7 +226,9 @@ impl Database {
                 chat_id INTEGER PRIMARY KEY,
                 chat_title TEXT,
                 chat_type TEXT NOT NULL DEFAULT 'private',
-                last_message_time TEXT NOT NULL
+                last_message_time TEXT NOT NULL,
+                channel TEXT,
+                external_chat_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -188,10 +304,26 @@ impl Database {
                 content TEXT NOT NULL,
                 category TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                embedding_model TEXT,
+                chat_channel TEXT,
+                external_chat_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_memories_chat ON memories(chat_id);
+
+            CREATE TABLE IF NOT EXISTS memory_reflector_state (
+                chat_id INTEGER PRIMARY KEY,
+                last_reflected_ts TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
+        )?;
+
+        ensure_chat_identity_schema(&conn)?;
+        ensure_memory_schema(&conn)?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
         )?;
 
         Ok(Database {
@@ -208,14 +340,81 @@ impl Database {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO chats (chat_id, chat_title, chat_type, last_message_time)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO chats (chat_id, chat_title, chat_type, last_message_time, channel, external_chat_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = COALESCE(?2, chat_title),
-                last_message_time = ?4",
-            params![chat_id, chat_title, chat_type, now],
+                chat_type = ?3,
+                last_message_time = ?4,
+                channel = COALESCE(?5, channel),
+                external_chat_id = COALESCE(?6, external_chat_id)",
+            params![
+                chat_id,
+                chat_title,
+                chat_type,
+                now,
+                infer_channel_from_chat_type(chat_type),
+                chat_id.to_string()
+            ],
         )?;
         Ok(())
+    }
+
+    pub fn resolve_or_create_chat_id(
+        &self,
+        channel: &str,
+        external_chat_id: &str,
+        chat_title: Option<&str>,
+        chat_type: &str,
+    ) -> Result<i64, MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        if let Some(chat_id) = conn
+            .query_row(
+                "SELECT chat_id FROM chats WHERE channel = ?1 AND external_chat_id = ?2 LIMIT 1",
+                params![channel, external_chat_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "UPDATE chats
+                 SET chat_title = COALESCE(?2, chat_title),
+                     chat_type = ?3,
+                     last_message_time = ?4
+                 WHERE chat_id = ?1",
+                params![chat_id, chat_title, chat_type, now],
+            )?;
+            return Ok(chat_id);
+        }
+
+        let preferred_chat_id = external_chat_id.parse::<i64>().ok();
+        if let Some(cid) = preferred_chat_id {
+            let occupied = conn
+                .query_row(
+                    "SELECT 1 FROM chats WHERE chat_id = ?1 LIMIT 1",
+                    params![cid],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !occupied {
+                conn.execute(
+                    "INSERT INTO chats(chat_id, chat_title, chat_type, last_message_time, channel, external_chat_id)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![cid, chat_title, chat_type, now, channel, external_chat_id],
+                )?;
+                return Ok(cid);
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO chats(chat_title, chat_type, last_message_time, channel, external_chat_id)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![chat_title, chat_type, now, channel, external_chat_id],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     pub fn store_message(&self, msg: &StoredMessage) -> Result<(), MicroClawError> {
@@ -371,6 +570,20 @@ impl Database {
         );
         match result {
             Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_chat_external_id(&self, chat_id: i64) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT external_chat_id FROM chats WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        );
+        match result {
+            Ok(v) => Ok(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -699,6 +912,10 @@ impl Database {
             "DELETE FROM scheduled_tasks WHERE chat_id = ?1",
             params![chat_id],
         )?;
+        affected += tx.execute(
+            "DELETE FROM memory_reflector_state WHERE chat_id = ?1",
+            params![chat_id],
+        )?;
         affected += tx.execute("DELETE FROM chats WHERE chat_id = ?1", params![chat_id])?;
 
         tx.commit()?;
@@ -730,6 +947,67 @@ impl Database {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(messages)
+    }
+
+    pub fn get_messages_since(
+        &self,
+        chat_id: i64,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_id, sender_name, content, is_from_bot, timestamp
+             FROM messages
+             WHERE chat_id = ?1 AND timestamp > ?2
+             ORDER BY timestamp ASC
+             LIMIT ?3",
+        )?;
+        let messages = stmt
+            .query_map(params![chat_id, since, limit as i64], |row| {
+                Ok(StoredMessage {
+                    id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    sender_name: row.get(2)?,
+                    content: row.get(3)?,
+                    is_from_bot: row.get::<_, i32>(4)? != 0,
+                    timestamp: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(messages)
+    }
+
+    pub fn get_reflector_cursor(&self, chat_id: i64) -> Result<Option<String>, MicroClawError> {
+        let conn = self.lock_conn();
+        let result = conn.query_row(
+            "SELECT last_reflected_ts FROM memory_reflector_state WHERE chat_id = ?1",
+            params![chat_id],
+            |row| row.get::<_, String>(0),
+        );
+        match result {
+            Ok(ts) => Ok(Some(ts)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_reflector_cursor(
+        &self,
+        chat_id: i64,
+        last_reflected_ts: &str,
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memory_reflector_state (chat_id, last_reflected_ts, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET
+                last_reflected_ts = excluded.last_reflected_ts,
+                updated_at = excluded.updated_at",
+            params![chat_id, last_reflected_ts, now],
+        )?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -952,10 +1230,34 @@ impl Database {
     ) -> Result<i64, MicroClawError> {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
+        let (chat_channel, external_chat_id) = if let Some(cid) = chat_id {
+            conn.query_row(
+                "SELECT channel, external_chat_id FROM chats WHERE chat_id = ?1",
+                params![cid],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
         conn.execute(
-            "INSERT INTO memories (chat_id, content, category, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![chat_id, content, category, now],
+            "INSERT INTO memories (
+                chat_id, content, category, created_at, updated_at, embedding_model, chat_channel, external_chat_id
+            ) VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?5, ?6)",
+            params![
+                chat_id,
+                content,
+                category,
+                now,
+                chat_channel,
+                external_chat_id
+            ],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -967,7 +1269,7 @@ impl Database {
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
              ORDER BY updated_at DESC
@@ -982,6 +1284,7 @@ impl Database {
                     category: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                    embedding_model: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -994,7 +1297,7 @@ impl Database {
     ) -> Result<Vec<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
              FROM memories
              WHERE (chat_id = ?1 OR (?1 IS NULL AND chat_id IS NULL))",
         )?;
@@ -1007,6 +1310,7 @@ impl Database {
                     category: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                    embedding_model: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1034,7 +1338,7 @@ impl Database {
         let conn = self.lock_conn();
         let pattern = format!("%{}%", query.to_lowercase());
         let mut stmt = conn.prepare(
-            "SELECT id, chat_id, content, category, created_at, updated_at
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
              FROM memories
              WHERE (chat_id = ?1 OR chat_id IS NULL)
                AND LOWER(content) LIKE ?2
@@ -1050,6 +1354,7 @@ impl Database {
                     category: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                    embedding_model: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1073,17 +1378,150 @@ impl Database {
         let conn = self.lock_conn();
         let now = chrono::Utc::now().to_rfc3339();
         let rows = conn.execute(
-            "UPDATE memories SET content = ?1, category = ?2, updated_at = ?3 WHERE id = ?4",
+            "UPDATE memories
+             SET content = ?1, category = ?2, updated_at = ?3, embedding_model = NULL
+             WHERE id = ?4",
             params![content, category, now, id],
         )?;
         Ok(rows > 0)
+    }
+
+    pub fn update_memory_embedding_model(
+        &self,
+        id: i64,
+        model: &str,
+    ) -> Result<bool, MicroClawError> {
+        let conn = self.lock_conn();
+        let rows = conn.execute(
+            "UPDATE memories SET embedding_model = ?1 WHERE id = ?2",
+            params![model, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn get_memories_without_embedding(
+        &self,
+        chat_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Memory>, MicroClawError> {
+        let conn = self.lock_conn();
+        let mut query = String::from(
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
+             FROM memories
+             WHERE embedding_model IS NULL",
+        );
+        if chat_id.is_some() {
+            query.push_str(" AND chat_id = ?1");
+        }
+        query.push_str(" ORDER BY updated_at DESC LIMIT ");
+        query.push_str(&limit.to_string());
+
+        let mut stmt = conn.prepare(&query)?;
+        let mapper = |row: &rusqlite::Row<'_>| {
+            Ok(Memory {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                content: row.get(2)?,
+                category: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                embedding_model: row.get(6)?,
+            })
+        };
+
+        let rows = if let Some(cid) = chat_id {
+            stmt.query_map(params![cid], mapper)?
+        } else {
+            stmt.query_map([], mapper)?
+        };
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    #[cfg(feature = "sqlite-vec")]
+    pub fn prepare_vector_index(&self, dimension: usize) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let dimension = dimension.max(1);
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS db_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )?;
+
+        let current_dim: Option<String> = conn
+            .query_row(
+                "SELECT value FROM db_meta WHERE key = 'embedding_dim'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = current_dim {
+            if existing != dimension.to_string() {
+                conn.execute("DROP TABLE IF EXISTS memories_vec", [])?;
+                conn.execute("UPDATE memories SET embedding_model = NULL", [])?;
+            }
+        }
+
+        conn.execute(
+            &format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
+                    embedding float[{dimension}] distance_metric=cosine
+                )"
+            ),
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO db_meta(key, value) VALUES('embedding_dim', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![dimension.to_string()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-vec")]
+    pub fn upsert_memory_vec(
+        &self,
+        memory_id: i64,
+        embedding: &[f32],
+    ) -> Result<(), MicroClawError> {
+        let conn = self.lock_conn();
+        let vector_json = serde_json::to_string(embedding)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO memories_vec(rowid, embedding) VALUES(?1, vec_f32(?2))",
+            params![memory_id, vector_json],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-vec")]
+    pub fn knn_memories(
+        &self,
+        chat_id: i64,
+        query_vec: &[f32],
+        k: usize,
+    ) -> Result<Vec<(i64, f32)>, MicroClawError> {
+        let conn = self.lock_conn();
+        let vector_json = serde_json::to_string(query_vec)?;
+        let mut stmt = conn.prepare(
+            "SELECT m.id, v.distance
+             FROM (
+                SELECT rowid, distance
+                FROM memories_vec
+                WHERE embedding MATCH vec_f32(?1) AND k = ?2
+             ) v
+             JOIN memories m ON m.id = v.rowid
+             WHERE (m.chat_id = ?3 OR m.chat_id IS NULL)
+             ORDER BY v.distance ASC",
+        )?;
+        let rows = stmt.query_map(params![vector_json, k as i64, chat_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Get a single memory by id.
     pub fn get_memory_by_id(&self, id: i64) -> Result<Option<Memory>, MicroClawError> {
         let conn = self.lock_conn();
         let result = conn.query_row(
-            "SELECT id, chat_id, content, category, created_at, updated_at
+            "SELECT id, chat_id, content, category, created_at, updated_at, embedding_model
              FROM memories WHERE id = ?1",
             params![id],
             |row| {
@@ -1094,6 +1532,7 @@ impl Database {
                     category: row.get(3)?,
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                    embedding_model: row.get(6)?,
                 })
             },
         );
@@ -1650,6 +2089,191 @@ mod tests {
     }
 
     #[test]
+    fn test_get_messages_since_includes_user_and_bot() {
+        let (db, dir) = test_db();
+        db.store_message(&StoredMessage {
+            id: "m1".into(),
+            chat_id: 100,
+            sender_name: "alice".into(),
+            content: "old".into(),
+            is_from_bot: false,
+            timestamp: "2024-01-01T00:00:01Z".into(),
+        })
+        .unwrap();
+        db.store_message(&StoredMessage {
+            id: "m2".into(),
+            chat_id: 100,
+            sender_name: "bot".into(),
+            content: "bot".into(),
+            is_from_bot: true,
+            timestamp: "2024-01-01T00:00:02Z".into(),
+        })
+        .unwrap();
+        db.store_message(&StoredMessage {
+            id: "m3".into(),
+            chat_id: 100,
+            sender_name: "alice".into(),
+            content: "new".into(),
+            is_from_bot: false,
+            timestamp: "2024-01-01T00:00:03Z".into(),
+        })
+        .unwrap();
+
+        let msgs = db
+            .get_messages_since(100, "2024-01-01T00:00:01Z", 10)
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].id, "m2");
+        assert_eq!(msgs[1].id, "m3");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_reflector_cursor_roundtrip() {
+        let (db, dir) = test_db();
+        assert!(db.get_reflector_cursor(100).unwrap().is_none());
+
+        db.set_reflector_cursor(100, "2024-01-01T00:00:03Z")
+            .unwrap();
+        assert_eq!(
+            db.get_reflector_cursor(100).unwrap().as_deref(),
+            Some("2024-01-01T00:00:03Z")
+        );
+
+        db.set_reflector_cursor(100, "2024-01-01T00:00:05Z")
+            .unwrap();
+        assert_eq!(
+            db.get_reflector_cursor(100).unwrap().as_deref(),
+            Some("2024-01-01T00:00:05Z")
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_resolve_or_create_chat_id_channel_scoped() {
+        let (db, dir) = test_db();
+
+        let tg = db
+            .resolve_or_create_chat_id(
+                "telegram",
+                "12345",
+                Some("telegram-12345"),
+                "telegram_private",
+            )
+            .unwrap();
+        let tg_again = db
+            .resolve_or_create_chat_id(
+                "telegram",
+                "12345",
+                Some("telegram-12345"),
+                "telegram_private",
+            )
+            .unwrap();
+        assert_eq!(tg, tg_again);
+
+        let discord = db
+            .resolve_or_create_chat_id("discord", "12345", Some("discord-12345"), "discord")
+            .unwrap();
+        assert_ne!(tg, discord);
+        assert_eq!(
+            db.get_chat_external_id(discord).unwrap().as_deref(),
+            Some("12345")
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_migration_backfills_chat_identity_columns() {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_migration_chat_identity_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("microclaw.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT,
+                chat_type TEXT NOT NULL DEFAULT 'private',
+                last_message_time TEXT NOT NULL
+            );
+            INSERT INTO chats(chat_id, chat_title, chat_type, last_message_time)
+            VALUES (100, 'legacy tg', 'telegram_private', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::new(dir.to_str().unwrap()).unwrap();
+        let conn = db.lock_conn();
+        let (channel, external): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT channel, external_chat_id FROM chats WHERE chat_id = 100",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(channel.as_deref(), Some("telegram"));
+        assert_eq!(external.as_deref(), Some("100"));
+        drop(conn);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_migration_backfills_memory_identity_columns() {
+        let dir = std::env::temp_dir().join(format!(
+            "microclaw_migration_memory_identity_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("microclaw.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT,
+                chat_type TEXT NOT NULL DEFAULT 'private',
+                last_message_time TEXT NOT NULL
+            );
+            INSERT INTO chats(chat_id, chat_title, chat_type, last_message_time)
+            VALUES (200, 'legacy discord', 'discord', '2026-01-01T00:00:00Z');
+
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                content TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                embedding_model TEXT
+            );
+            INSERT INTO memories(chat_id, content, category, created_at, updated_at, embedding_model)
+            VALUES (200, 'legacy memory', 'KNOWLEDGE', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Database::new(dir.to_str().unwrap()).unwrap();
+        let conn = db.lock_conn();
+        let (chat_channel, external): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT chat_channel, external_chat_id FROM memories WHERE chat_id = 200",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(chat_channel.as_deref(), Some("discord"));
+        assert_eq!(external.as_deref(), Some("200"));
+        drop(conn);
+
+        cleanup(&dir);
+    }
+
+    #[test]
     fn test_log_llm_usage_and_summary() {
         let (db, dir) = test_db();
         db.log_llm_usage(
@@ -1952,6 +2576,60 @@ mod tests {
         assert_eq!(mem.category, "KNOWLEDGE");
 
         assert!(db.get_memory_by_id(9999).unwrap().is_none());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_update_memory_embedding_model_and_query_missing() {
+        let (db, dir) = test_db();
+        let id1 = db
+            .insert_memory(Some(100), "memory one", "KNOWLEDGE")
+            .unwrap();
+        let id2 = db
+            .insert_memory(Some(100), "memory two", "KNOWLEDGE")
+            .unwrap();
+
+        let missing_before = db.get_memories_without_embedding(Some(100), 10).unwrap();
+        assert_eq!(missing_before.len(), 2);
+
+        assert!(db
+            .update_memory_embedding_model(id1, "text-embedding-3-small")
+            .unwrap());
+
+        let mem1 = db.get_memory_by_id(id1).unwrap().unwrap();
+        assert_eq!(
+            mem1.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        let mem2 = db.get_memory_by_id(id2).unwrap().unwrap();
+        assert!(mem2.embedding_model.is_none());
+
+        let missing_after = db.get_memories_without_embedding(Some(100), 10).unwrap();
+        assert_eq!(missing_after.len(), 1);
+        assert_eq!(missing_after[0].id, id2);
+
+        cleanup(&dir);
+    }
+
+    #[cfg(feature = "sqlite-vec")]
+    #[test]
+    fn test_sqlite_vec_prepare_and_knn() {
+        let (db, dir) = test_db();
+        db.prepare_vector_index(3).unwrap();
+        let id1 = db
+            .insert_memory(Some(100), "vector one", "KNOWLEDGE")
+            .unwrap();
+        let id2 = db
+            .insert_memory(Some(100), "vector two", "KNOWLEDGE")
+            .unwrap();
+        db.upsert_memory_vec(id1, &[1.0, 0.0, 0.0]).unwrap();
+        db.upsert_memory_vec(id2, &[0.0, 1.0, 0.0]).unwrap();
+
+        let nearest = db.knn_memories(100, &[0.95, 0.05, 0.0], 1).unwrap();
+        assert_eq!(nearest.len(), 1);
+        assert_eq!(nearest[0].0, id1);
+        assert!(nearest[0].1 >= 0.0);
 
         cleanup(&dir);
     }

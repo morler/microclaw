@@ -62,6 +62,13 @@ impl SendMessageTool {
             .map_err(|e| format!("Failed to store sent message: {e}"))
     }
 
+    async fn resolve_external_chat_id(&self, chat_id: i64) -> Result<String, String> {
+        let external = call_blocking(self.db.clone(), move |db| db.get_chat_external_id(chat_id))
+            .await
+            .map_err(|e| format!("Failed to resolve external chat id: {e}"))?;
+        Ok(external.unwrap_or_else(|| chat_id.to_string()))
+    }
+
     fn is_likely_image(file_path: &std::path::Path) -> bool {
         file_path
             .extension()
@@ -102,15 +109,25 @@ impl SendMessageTool {
             .ok_or_else(|| "telegram_bot_token not configured".to_string())?;
         let (caption_for_attachment, overflow_text) = Self::split_telegram_caption(caption.clone());
 
+        let external_chat_id = self.resolve_external_chat_id(chat_id).await?;
+        let telegram_chat_id = external_chat_id.parse::<i64>().map_err(|_| {
+            format!(
+                "Invalid Telegram external_chat_id '{}' for internal chat {}",
+                external_chat_id, chat_id
+            )
+        })?;
+
         if Self::is_likely_image(&file_path) {
-            let mut req = bot.send_photo(ChatId(chat_id), InputFile::file(file_path.clone()));
+            let mut req =
+                bot.send_photo(ChatId(telegram_chat_id), InputFile::file(file_path.clone()));
             if let Some(c) = &caption_for_attachment {
                 req = req.caption(c.clone());
             }
             req.await
                 .map_err(|e| format!("Failed to send Telegram photo: {e}"))?;
         } else {
-            let mut req = bot.send_document(ChatId(chat_id), InputFile::file(file_path.clone()));
+            let mut req =
+                bot.send_document(ChatId(telegram_chat_id), InputFile::file(file_path.clone()));
             if let Some(c) = &caption_for_attachment {
                 req = req.caption(c.clone());
             }
@@ -119,7 +136,7 @@ impl SendMessageTool {
         }
 
         if let Some(extra) = overflow_text {
-            crate::telegram::send_response(bot, ChatId(chat_id), &extra).await;
+            crate::telegram::send_response(bot, ChatId(telegram_chat_id), &extra).await;
         }
 
         Ok(match caption {
@@ -143,6 +160,13 @@ impl SendMessageTool {
             .as_deref()
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| "discord_bot_token not configured".to_string())?;
+        let external_chat_id = self.resolve_external_chat_id(chat_id).await?;
+        let discord_chat_id = external_chat_id.parse::<u64>().map_err(|_| {
+            format!(
+                "Invalid Discord external_chat_id '{}' for internal chat {}",
+                external_chat_id, chat_id
+            )
+        })?;
 
         let filename = file_path
             .file_name()
@@ -161,7 +185,7 @@ impl SendMessageTool {
                 reqwest::multipart::Part::bytes(bytes).file_name(filename),
             );
 
-        let url = format!("https://discord.com/api/v10/channels/{chat_id}/messages");
+        let url = format!("https://discord.com/api/v10/channels/{discord_chat_id}/messages");
         let resp = self
             .http_client
             .post(url)

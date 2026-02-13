@@ -1,5 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -328,14 +327,6 @@ fn normalize_session_key(session_key: Option<&str>) -> String {
     }
 }
 
-fn session_key_to_chat_id(session_key: &str) -> i64 {
-    // Stable mapping into i64 space; we mark these chats with chat_type="web".
-    let mut hasher = DefaultHasher::new();
-    format!("web:{session_key}").hash(&mut hasher);
-    let hash = hasher.finish();
-    (hash & 0x3FFF_FFFF_FFFF_FFFF) as i64
-}
-
 #[derive(Debug, Serialize)]
 struct SessionItem {
     session_key: String,
@@ -398,6 +389,12 @@ struct UpdateConfigRequest {
     max_tokens: Option<u32>,
     max_tool_iterations: Option<usize>,
     max_document_size_mb: Option<u64>,
+    memory_token_budget: Option<usize>,
+    embedding_provider: Option<Option<String>>,
+    embedding_api_key: Option<Option<String>>,
+    embedding_base_url: Option<Option<String>>,
+    embedding_model: Option<Option<String>>,
+    embedding_dim: Option<Option<usize>>,
     working_dir_isolation: Option<WorkingDirIsolation>,
 
     telegram_bot_token: Option<String>,
@@ -441,6 +438,9 @@ fn redact_config(config: &Config) -> serde_json::Value {
     }
     if cfg.discord_bot_token.is_some() {
         cfg.discord_bot_token = Some("***".into());
+    }
+    if cfg.embedding_api_key.is_some() {
+        cfg.embedding_api_key = Some("***".into());
     }
     if cfg.web_auth_token.is_some() {
         cfg.web_auth_token = Some("***".into());
@@ -512,6 +512,24 @@ async fn api_update_config(
     }
     if let Some(v) = body.max_document_size_mb {
         cfg.max_document_size_mb = v;
+    }
+    if let Some(v) = body.memory_token_budget {
+        cfg.memory_token_budget = v;
+    }
+    if let Some(v) = body.embedding_provider {
+        cfg.embedding_provider = v;
+    }
+    if let Some(v) = body.embedding_api_key {
+        cfg.embedding_api_key = v;
+    }
+    if let Some(v) = body.embedding_base_url {
+        cfg.embedding_base_url = v;
+    }
+    if let Some(v) = body.embedding_model {
+        cfg.embedding_model = v;
+    }
+    if let Some(v) = body.embedding_dim {
+        cfg.embedding_dim = v;
     }
     if let Some(v) = body.working_dir_isolation {
         cfg.working_dir_isolation = v;
@@ -621,11 +639,6 @@ fn parse_chat_id_from_session_key(session_key: &str) -> Option<i64> {
         .and_then(|s| s.parse::<i64>().ok())
 }
 
-fn resolve_chat_id(session_key: &str) -> i64 {
-    parse_chat_id_from_session_key(session_key)
-        .unwrap_or_else(|| session_key_to_chat_id(session_key))
-}
-
 async fn resolve_chat_id_for_session_key(
     state: &WebState,
     session_key: &str,
@@ -644,7 +657,16 @@ async fn resolve_chat_id_for_session_key(
     .find(|c| c.chat_title.as_deref() == Some(key.as_str()))
     .map(|c| c.chat_id);
 
-    Ok(by_title.unwrap_or_else(|| resolve_chat_id(session_key)))
+    if let Some(cid) = by_title {
+        return Ok(cid);
+    }
+
+    let key = session_key.to_string();
+    call_blocking(state.app_state.db.clone(), move |db| {
+        db.resolve_or_create_chat_id("web", &key, Some(&key), "web")
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn api_sessions(
@@ -672,7 +694,7 @@ async fn api_history(
     require_auth(&headers, state.auth_token.as_deref())?;
 
     let session_key = normalize_session_key(query.session_key.as_deref());
-    let chat_id = resolve_chat_id(&session_key);
+    let chat_id = resolve_chat_id_for_session_key(&state, &session_key).await?;
 
     let mut messages = call_blocking(state.app_state.db.clone(), move |db| {
         db.get_all_messages(chat_id)
@@ -1074,8 +1096,22 @@ async fn send_and_store_response_with_events(
     }
 
     let session_key = normalize_session_key(body.session_key.as_deref());
-    let chat_id = resolve_chat_id(&session_key);
     let parsed_chat_id = parse_chat_id_from_session_key(&session_key);
+    let chat_id = if let Some(explicit_chat_id) = parsed_chat_id {
+        explicit_chat_id
+    } else {
+        let session_key_for_lookup = session_key.clone();
+        call_blocking(state.app_state.db.clone(), move |db| {
+            db.resolve_or_create_chat_id(
+                "web",
+                &session_key_for_lookup,
+                Some(&session_key_for_lookup),
+                "web",
+            )
+        })
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
     let sender_name = body
         .sender_name
         .as_deref()
@@ -1096,13 +1132,6 @@ async fn send_and_store_response_with_events(
                 "this channel is read-only in Web UI; use source channel to send".into(),
             ));
         }
-    } else {
-        let session_key_for_chat = session_key.clone();
-        call_blocking(state.app_state.db.clone(), move |db| {
-            db.upsert_chat(chat_id, Some(&session_key_for_chat), "web")
-        })
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
 
     let user_msg = StoredMessage {
@@ -1450,6 +1479,7 @@ mod tests {
             max_tool_iterations: 100,
             max_history_messages: 50,
             max_document_size_mb: 100,
+            memory_token_budget: 1500,
             data_dir: "./microclaw.data".into(),
             working_dir: "./tmp".into(),
             working_dir_isolation: WorkingDirIsolation::Shared,
@@ -1472,6 +1502,11 @@ mod tests {
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
             model_prices: vec![],
+            embedding_provider: None,
+            embedding_api_key: None,
+            embedding_base_url: None,
+            embedding_model: None,
+            embedding_dim: None,
             reflector_enabled: true,
             reflector_interval_mins: 15,
         };
@@ -1490,6 +1525,7 @@ mod tests {
             memory: MemoryManager::new(&runtime_dir),
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
+            embedding: None,
             tools: ToolRegistry::new(&cfg, Some(bot), db),
         };
         Arc::new(state)
@@ -1824,5 +1860,36 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(message_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_web_session_key_resolves_to_channel_scoped_chat_id() {
+        let web_state = test_web_state(Box::new(DummyLlm), None, WebLimits::default());
+        let app = build_router(web_state.clone());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/send")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"session_key":"scoped-main","sender_name":"u","message":"hello"}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let db = web_state.app_state.db.clone();
+        let chat_id = call_blocking(db.clone(), move |d| {
+            d.resolve_or_create_chat_id("web", "scoped-main", Some("scoped-main"), "web")
+        })
+        .await
+        .unwrap();
+        let external = call_blocking(db.clone(), move |d| d.get_chat_external_id(chat_id))
+            .await
+            .unwrap();
+        let routing = get_chat_routing(db, chat_id).await.unwrap();
+
+        assert_eq!(routing.map(|r| r.channel), Some(ChatChannel::Web));
+        assert_eq!(external.as_deref(), Some("scoped-main"));
     }
 }

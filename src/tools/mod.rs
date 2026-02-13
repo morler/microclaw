@@ -318,7 +318,7 @@ impl ToolRegistry {
                 config.working_dir_isolation,
             )),
             Box::new(memory::ReadMemoryTool::new(&config.data_dir)),
-            Box::new(memory::WriteMemoryTool::new(&config.data_dir)),
+            Box::new(memory::WriteMemoryTool::new(&config.data_dir, db.clone())),
             Box::new(web_fetch::WebFetchTool),
             Box::new(web_search::WebSearchTool),
             Box::new(send_message::SendMessageTool::new_with_config(

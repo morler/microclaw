@@ -3,9 +3,12 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use teloxide::prelude::*;
 use tracing::info;
+#[cfg(feature = "sqlite-vec")]
+use tracing::warn;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::embedding::EmbeddingProvider;
 use crate::llm::LlmProvider;
 use crate::memory::MemoryManager;
 use crate::skills::SkillManager;
@@ -18,6 +21,7 @@ pub struct AppState {
     pub memory: MemoryManager,
     pub skills: SkillManager,
     pub llm: Box<dyn LlmProvider>,
+    pub embedding: Option<Arc<dyn EmbeddingProvider>>,
     pub tools: ToolRegistry,
 }
 
@@ -36,6 +40,18 @@ pub async fn run(
 
     let db = Arc::new(db);
     let llm = crate::llm::create_provider(&config);
+    let embedding = crate::embedding::create_provider(&config);
+    #[cfg(feature = "sqlite-vec")]
+    {
+        let dim = embedding
+            .as_ref()
+            .map(|e| e.dimension())
+            .or(config.embedding_dim)
+            .unwrap_or(1536);
+        if let Err(e) = db.prepare_vector_index(dim) {
+            warn!("Failed to initialize sqlite-vec index: {e}");
+        }
+    }
     let mut tools = ToolRegistry::new(&config, telegram_bot.clone(), db.clone());
 
     for (server, tool_info) in mcp_manager.all_tools() {
@@ -49,6 +65,7 @@ pub async fn run(
         memory,
         skills,
         llm,
+        embedding,
         tools,
     });
 

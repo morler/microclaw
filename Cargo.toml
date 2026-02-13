@@ -1,8 +1,12 @@
 [package]
 name = "microclaw"
-version = "0.0.53"
+version = "0.0.55"
 edition = "2021"
 license = "MIT"
+
+[features]
+default = []
+sqlite-vec = ["dep:sqlite-vec"]
 
 [dependencies]
 teloxide = { version = "0.17", features = ["macros"] }
@@ -32,6 +36,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 include_dir = "0.7"
 async-stream = "0.3"
 futures-util = "0.3"
+sqlite-vec = { version = "0.1.7-alpha.10", optional = true }
 
 [dev-dependencies]
 tower = "0.5"

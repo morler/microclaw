@@ -150,6 +150,10 @@ pub async fn deliver_and_store_bot_message(
     text: &str,
 ) -> Result<(), String> {
     let routing = get_required_chat_routing(db.clone(), chat_id).await?;
+    let external_chat_id = call_blocking(db.clone(), move |d| d.get_chat_external_id(chat_id))
+        .await
+        .map_err(|e| format!("Failed to read external chat id for chat {chat_id}: {e}"))?
+        .unwrap_or_else(|| chat_id.to_string());
 
     match routing.channel {
         ChatChannel::Web => {}
@@ -157,11 +161,23 @@ pub async fn deliver_and_store_bot_message(
             let bot = telegram_bot.ok_or_else(|| {
                 "telegram_bot_token not configured for Telegram delivery".to_string()
             })?;
-            send_telegram_text(bot, chat_id, text).await?;
+            let telegram_chat_id = external_chat_id.parse::<i64>().map_err(|_| {
+                format!(
+                    "Invalid Telegram external_chat_id '{}' for internal chat {}",
+                    external_chat_id, chat_id
+                )
+            })?;
+            send_telegram_text(bot, telegram_chat_id, text).await?;
         }
         ChatChannel::Discord => {
             let cfg = config.ok_or_else(|| "send_message config unavailable".to_string())?;
-            send_discord_text(cfg, chat_id, text).await?;
+            let discord_chat_id = external_chat_id.parse::<u64>().map_err(|_| {
+                format!(
+                    "Invalid Discord external_chat_id '{}' for internal chat {}",
+                    external_chat_id, chat_id
+                )
+            })?;
+            send_discord_text(cfg, discord_chat_id, text).await?;
         }
     }
 
