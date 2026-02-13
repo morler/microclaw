@@ -3,7 +3,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 
 use super::{auth_context_from_input, authorize_chat_access, schema_object, Tool, ToolResult};
 

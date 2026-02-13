@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::web_html::extract_ddg_results;
 use super::{schema_object, Tool, ToolResult};
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 
 pub struct WebSearchTool;
 

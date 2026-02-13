@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::agent_engine::archive_conversation;
 use crate::agent_engine::process_with_agent;
 use crate::agent_engine::AgentRequestContext;
-use crate::claude::Message as ClaudeMessage;
+use crate::llm_types::Message as ClaudeMessage;
 use crate::db::call_blocking;
 use crate::db::StoredMessage;
 use crate::runtime::AppState;

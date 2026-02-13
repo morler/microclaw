@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
 
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::text::floor_char_boundary;
 use crate::tools::command_runner::agent_browser_program;
 

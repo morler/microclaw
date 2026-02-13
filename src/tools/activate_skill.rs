@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
 
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::skills::SkillManager;
 
 use super::{schema_object, Tool, ToolResult};

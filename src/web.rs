@@ -1307,7 +1307,7 @@ mod tests {
     use crate::config::{Config, WorkingDirIsolation};
     use crate::db::call_blocking;
     use crate::llm::LlmProvider;
-    use crate::{claude::ResponseContentBlock, error::MicroClawError};
+    use crate::{error::MicroClawError, llm_types::ResponseContentBlock};
     use crate::{db::Database, memory::MemoryManager, skills::SkillManager, tools::ToolRegistry};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -1344,11 +1344,11 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::claude::Message>,
-            _tools: Option<Vec<crate::claude::ToolDefinition>>,
-        ) -> Result<crate::claude::MessagesResponse, crate::error::MicroClawError> {
-            Ok(crate::claude::MessagesResponse {
-                content: vec![crate::claude::ResponseContentBlock::Text {
+            _messages: Vec<crate::llm_types::Message>,
+            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
+        ) -> Result<crate::llm_types::MessagesResponse, crate::error::MicroClawError> {
+            Ok(crate::llm_types::MessagesResponse {
+                content: vec![crate::llm_types::ResponseContentBlock::Text {
                     text: "hello from llm".into(),
                 }],
                 stop_reason: Some("end_turn".into()),
@@ -1359,10 +1359,10 @@ mod tests {
         async fn send_message_stream(
             &self,
             _system: &str,
-            _messages: Vec<crate::claude::Message>,
-            _tools: Option<Vec<crate::claude::ToolDefinition>>,
+            _messages: Vec<crate::llm_types::Message>,
+            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
             text_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
-        ) -> Result<crate::claude::MessagesResponse, crate::error::MicroClawError> {
+        ) -> Result<crate::llm_types::MessagesResponse, crate::error::MicroClawError> {
             if let Some(tx) = text_tx {
                 let _ = tx.send("hello ".into());
                 let _ = tx.send("from llm".into());
@@ -1380,11 +1380,11 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::claude::Message>,
-            _tools: Option<Vec<crate::claude::ToolDefinition>>,
-        ) -> Result<crate::claude::MessagesResponse, MicroClawError> {
+            _messages: Vec<crate::llm_types::Message>,
+            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
+        ) -> Result<crate::llm_types::MessagesResponse, MicroClawError> {
             tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
-            Ok(crate::claude::MessagesResponse {
+            Ok(crate::llm_types::MessagesResponse {
                 content: vec![ResponseContentBlock::Text {
                     text: "slow".into(),
                 }],
@@ -1403,12 +1403,12 @@ mod tests {
         async fn send_message(
             &self,
             _system: &str,
-            _messages: Vec<crate::claude::Message>,
-            _tools: Option<Vec<crate::claude::ToolDefinition>>,
-        ) -> Result<crate::claude::MessagesResponse, MicroClawError> {
+            _messages: Vec<crate::llm_types::Message>,
+            _tools: Option<Vec<crate::llm_types::ToolDefinition>>,
+        ) -> Result<crate::llm_types::MessagesResponse, MicroClawError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
-                return Ok(crate::claude::MessagesResponse {
+                return Ok(crate::llm_types::MessagesResponse {
                     content: vec![ResponseContentBlock::ToolUse {
                         id: "tool_1".into(),
                         name: "glob".into(),
@@ -1418,7 +1418,7 @@ mod tests {
                     usage: None,
                 });
             }
-            Ok(crate::claude::MessagesResponse {
+            Ok(crate::llm_types::MessagesResponse {
                 content: vec![ResponseContentBlock::Text {
                     text: "after tool".into(),
                 }],

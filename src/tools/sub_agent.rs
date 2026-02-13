@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use super::{auth_context_from_input, schema_object, Tool, ToolRegistry, ToolResult};
-use crate::claude::{ContentBlock, Message, MessageContent, ResponseContentBlock, ToolDefinition};
+use crate::llm_types::{ContentBlock, Message, MessageContent, ResponseContentBlock, ToolDefinition};
 use crate::config::Config;
 #[cfg(test)]
 use crate::config::WorkingDirIsolation;

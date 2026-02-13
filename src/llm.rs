@@ -7,7 +7,7 @@ use tracing::warn;
 
 use std::collections::HashSet;
 
-use crate::claude::{
+use crate::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, MessagesRequest, MessagesResponse,
     ResponseContentBlock, ToolDefinition, Usage,
 };
@@ -1572,7 +1572,16 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
 
     // -----------------------------------------------------------------------
     // translate_messages_to_oai
@@ -2022,9 +2031,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_openai_codex_stream_uses_responses_endpoint() {
+        let _guard = env_lock();
+        let prev_access = std::env::var("OPENAI_CODEX_ACCESS_TOKEN").ok();
+        std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", "oauth-token");
+
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let (path_tx, path_rx) = mpsc::channel::<String>();
+        let (request_tx, request_rx) = mpsc::channel::<(String, Option<String>)>();
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2041,7 +2054,19 @@ mod tests {
                 .and_then(|line| line.split_whitespace().nth(1))
                 .unwrap_or("")
                 .to_string();
-            let _ = path_tx.send(path);
+            let auth_header = req.lines().find_map(|line| {
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("authorization:") {
+                    Some(
+                        line.split_once(':')
+                            .map(|(_, v)| v.trim().to_string())
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    None
+                }
+            });
+            let _ = request_tx.send((path, auth_header));
 
             let body = r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}"#;
             let response = format!(
@@ -2073,10 +2098,6 @@ mod tests {
             control_chat_ids: vec![],
             max_session_messages: 40,
             compact_keep_recent: 20,
-            whatsapp_access_token: None,
-            whatsapp_phone_number_id: None,
-            whatsapp_verify_token: None,
-            whatsapp_webhook_port: 8080,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
             show_thinking: false,
@@ -2089,6 +2110,7 @@ mod tests {
             web_rate_window_seconds: 10,
             web_run_history_limit: 512,
             web_session_idle_ttl_seconds: 300,
+            model_prices: vec![],
         };
         let provider = OpenAiProvider::new(&config);
         let messages = vec![Message {
@@ -2101,10 +2123,16 @@ mod tests {
             .unwrap();
         drop(tx);
 
-        let path = path_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (path, auth_header) = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         server.join().unwrap();
+        if let Some(prev) = prev_access {
+            std::env::set_var("OPENAI_CODEX_ACCESS_TOKEN", prev);
+        } else {
+            std::env::remove_var("OPENAI_CODEX_ACCESS_TOKEN");
+        }
 
         assert_eq!(path, "/responses");
+        assert_eq!(auth_header.as_deref(), Some("Bearer oauth-token"));
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
         match &resp.content[0] {
             ResponseContentBlock::Text { text } => assert_eq!(text, "ok"),

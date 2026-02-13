@@ -3,7 +3,7 @@ use serde_json::json;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::config::WorkingDirIsolation;
 
 use super::{schema_object, Tool, ToolResult};

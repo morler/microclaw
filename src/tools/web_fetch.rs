@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::web_html::{extract_primary_html, html_to_text};
 use super::{schema_object, Tool, ToolResult};
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::text::floor_char_boundary;
 
 pub struct WebFetchTool;

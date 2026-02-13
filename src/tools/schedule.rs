@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::channel::enforce_channel_policy;
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::db::{call_blocking, Database};
 
 fn compute_next_run(cron_expr: &str, tz_name: &str) -> Result<String, String> {

@@ -2,7 +2,7 @@ pub mod agent_engine;
 pub mod builtin_skills;
 pub mod channel;
 pub mod channels;
-pub mod claude;
+pub mod llm_types;
 pub mod codex_auth;
 pub mod config;
 pub mod db;

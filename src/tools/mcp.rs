@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::claude::ToolDefinition;
+use crate::llm_types::ToolDefinition;
 use crate::mcp::{McpServer, McpToolInfo};
 
 use super::{Tool, ToolResult};
