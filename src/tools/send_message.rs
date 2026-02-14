@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
+use tracing::{info, warn};
 
 use super::{authorize_chat_access, schema_object, Tool, ToolResult};
 use crate::channel::{
@@ -269,6 +270,12 @@ impl Tool for SendMessageTool {
         if text.is_empty() && attachment_path.is_none() {
             return ToolResult::error("Provide text and/or attachment_path".into());
         }
+        info!(
+            "send_message start: chat_id={}, has_text={}, has_attachment={}",
+            chat_id,
+            !text.is_empty(),
+            attachment_path.is_some()
+        );
 
         if let Err(e) = authorize_chat_access(&input, chat_id) {
             return ToolResult::error(e);
@@ -283,9 +290,21 @@ impl Tool for SendMessageTool {
                 Ok(v) => v,
                 Err(e) => return ToolResult::error(e),
             };
+            info!(
+                "send_message attachment routing: chat_id={}, channel={:?}, path={}",
+                chat_id, routing.channel, path
+            );
 
             let file_path = PathBuf::from(&path);
             if !file_path.is_file() {
+                warn!(
+                    "send_message attachment missing: chat_id={}, path={}, current_dir={}",
+                    chat_id,
+                    file_path.display(),
+                    std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string())
+                );
                 return ToolResult::error(format!(
                     "attachment_path not found or not a file: {path}"
                 ));
@@ -315,12 +334,26 @@ impl Tool for SendMessageTool {
 
             match send_result {
                 Ok(content) => {
+                    info!(
+                        "send_message attachment sent: chat_id={}, path={}",
+                        chat_id,
+                        file_path.display()
+                    );
                     if let Err(e) = self.store_bot_message(chat_id, content).await {
+                        warn!("send_message store_bot_message failed: chat_id={}, error={}", chat_id, e);
                         return ToolResult::error(e);
                     }
                     ToolResult::success("Attachment sent successfully.".into())
                 }
-                Err(e) => ToolResult::error(e),
+                Err(e) => {
+                    warn!(
+                        "send_message attachment delivery failed: chat_id={}, path={}, error={}",
+                        chat_id,
+                        file_path.display(),
+                        e
+                    );
+                    ToolResult::error(e)
+                }
             }
         } else {
             match deliver_and_store_bot_message(
@@ -333,8 +366,17 @@ impl Tool for SendMessageTool {
             )
             .await
             {
-                Ok(_) => ToolResult::success("Message sent successfully.".into()),
-                Err(e) => ToolResult::error(e),
+                Ok(_) => {
+                    info!("send_message text sent: chat_id={}", chat_id);
+                    ToolResult::success("Message sent successfully.".into())
+                }
+                Err(e) => {
+                    warn!(
+                        "send_message text delivery failed: chat_id={}, error={}",
+                        chat_id, e
+                    );
+                    ToolResult::error(e)
+                }
             }
         }
     }

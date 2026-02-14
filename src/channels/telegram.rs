@@ -500,6 +500,12 @@ async fn handle_message(
                 let _ = call_blocking(state.db.clone(), move |db| db.store_message(&bot_msg)).await;
             }
             // If response is empty, agent likely used send_message tool directly
+            else {
+                info!(
+                    "Agent returned empty final response for chat {}; likely delivered via send_message tool",
+                    chat_id
+                );
+            }
         }
         Err(e) => {
             typing_handle.abort();
