@@ -443,11 +443,12 @@ impl Config {
             .unwrap_or(false)
             || self.channels.contains_key("discord");
         let has_slack = self.channels.contains_key("slack");
+        let has_feishu = self.channels.contains_key("feishu");
         let has_web = self.web_enabled || self.channels.contains_key("web");
 
-        if !(has_telegram || has_discord || has_slack || has_web) {
+        if !(has_telegram || has_discord || has_slack || has_feishu || has_web) {
             return Err(MicroClawError::Config(
-                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, channels.slack, or web_enabled=true".into(),
+                "At least one channel must be enabled: telegram_bot_token, discord_bot_token, channels.slack, channels.feishu, or web_enabled=true".into(),
             ));
         }
         if self.api_key.is_empty() && !provider_allows_empty_api_key(&self.llm_provider) {

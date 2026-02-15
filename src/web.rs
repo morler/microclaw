@@ -436,6 +436,13 @@ struct UpdateConfigRequest {
     discord_bot_token: Option<String>,
     discord_allowed_channels: Option<Vec<u64>>,
 
+    slack_bot_token: Option<String>,
+    slack_app_token: Option<String>,
+
+    feishu_app_id: Option<String>,
+    feishu_app_secret: Option<String>,
+    feishu_domain: Option<String>,
+
     reflector_enabled: Option<bool>,
     reflector_interval_mins: Option<u64>,
 
@@ -478,6 +485,28 @@ fn redact_config(config: &Config) -> serde_json::Value {
     }
     if cfg.web_auth_token.is_some() {
         cfg.web_auth_token = Some("***".into());
+    }
+
+    // Redact secrets in channels map (slack bot_token/app_token, feishu app_secret)
+    if let Some(slack) = cfg.channels.get_mut("slack") {
+        if let Some(map) = slack.as_mapping_mut() {
+            let bt_key = serde_yaml::Value::String("bot_token".into());
+            if map.contains_key(&bt_key) {
+                map.insert(bt_key, serde_yaml::Value::String("***".into()));
+            }
+            let at_key = serde_yaml::Value::String("app_token".into());
+            if map.contains_key(&at_key) {
+                map.insert(at_key, serde_yaml::Value::String("***".into()));
+            }
+        }
+    }
+    if let Some(feishu) = cfg.channels.get_mut("feishu") {
+        if let Some(map) = feishu.as_mapping_mut() {
+            let key = serde_yaml::Value::String("app_secret".into());
+            if map.contains_key(&key) {
+                map.insert(key, serde_yaml::Value::String("***".into()));
+            }
+        }
     }
 
     json!(cfg)
@@ -579,6 +608,70 @@ async fn api_update_config(
     }
     if let Some(v) = body.discord_allowed_channels {
         cfg.discord_allowed_channels = v;
+    }
+
+    // Slack channel config
+    if body.slack_bot_token.is_some() || body.slack_app_token.is_some() {
+        let slack = cfg
+            .channels
+            .entry("slack".into())
+            .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+        if let Some(map) = slack.as_mapping_mut() {
+            if let Some(v) = body.slack_bot_token {
+                if !v.trim().is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("bot_token".into()),
+                        serde_yaml::Value::String(v),
+                    );
+                }
+            }
+            if let Some(v) = body.slack_app_token {
+                if !v.trim().is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("app_token".into()),
+                        serde_yaml::Value::String(v),
+                    );
+                }
+            }
+        }
+    }
+
+    // Feishu channel config
+    if body.feishu_app_id.is_some()
+        || body.feishu_app_secret.is_some()
+        || body.feishu_domain.is_some()
+    {
+        let feishu = cfg
+            .channels
+            .entry("feishu".into())
+            .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+        if let Some(map) = feishu.as_mapping_mut() {
+            if let Some(v) = body.feishu_app_id {
+                if !v.trim().is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("app_id".into()),
+                        serde_yaml::Value::String(v),
+                    );
+                }
+            }
+            if let Some(v) = body.feishu_app_secret {
+                if !v.trim().is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("app_secret".into()),
+                        serde_yaml::Value::String(v),
+                    );
+                }
+            }
+            if let Some(v) = body.feishu_domain {
+                let domain = v.trim().to_string();
+                if !domain.is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("domain".into()),
+                        serde_yaml::Value::String(domain),
+                    );
+                }
+            }
+        }
     }
 
     if let Some(v) = body.reflector_enabled {

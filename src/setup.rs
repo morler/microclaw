@@ -269,7 +269,7 @@ struct PickerState {
 
 impl SetupApp {
     fn channel_options() -> &'static [&'static str] {
-        &["telegram", "discord"]
+        &["telegram", "discord", "slack", "feishu"]
     }
 
     fn new() -> Self {
@@ -318,6 +318,41 @@ impl SetupApp {
                     value: existing.get("DISCORD_BOT_TOKEN").cloned().unwrap_or_default(),
                     required: false,
                     secret: true,
+                },
+                Field {
+                    key: "SLACK_BOT_TOKEN",
+                    label: "Slack bot token (xoxb-...)",
+                    value: existing.get("SLACK_BOT_TOKEN").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
+                    key: "SLACK_APP_TOKEN",
+                    label: "Slack app token (xapp-...)",
+                    value: existing.get("SLACK_APP_TOKEN").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
+                    key: "FEISHU_APP_ID",
+                    label: "Feishu app ID",
+                    value: existing.get("FEISHU_APP_ID").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: false,
+                },
+                Field {
+                    key: "FEISHU_APP_SECRET",
+                    label: "Feishu app secret",
+                    value: existing.get("FEISHU_APP_SECRET").cloned().unwrap_or_default(),
+                    required: false,
+                    secret: true,
+                },
+                Field {
+                    key: "FEISHU_DOMAIN",
+                    label: "Feishu domain (feishu/lark/custom)",
+                    value: existing.get("FEISHU_DOMAIN").cloned().unwrap_or_else(|| "feishu".into()),
+                    required: false,
+                    secret: false,
                 },
                 Field {
                     key: "LLM_PROVIDER",
@@ -488,6 +523,12 @@ impl SetupApp {
                     {
                         enabled.push("discord");
                     }
+                    if config.channels.contains_key("slack") {
+                        enabled.push("slack");
+                    }
+                    if config.channels.contains_key("feishu") {
+                        enabled.push("feishu");
+                    }
                     map.insert("ENABLED_CHANNELS".into(), enabled.join(","));
                     map.insert("TELEGRAM_BOT_TOKEN".into(), config.telegram_bot_token);
                     map.insert("BOT_USERNAME".into(), config.bot_username);
@@ -495,6 +536,27 @@ impl SetupApp {
                         "DISCORD_BOT_TOKEN".into(),
                         config.discord_bot_token.unwrap_or_default(),
                     );
+                    // Extract Slack channel config
+                    if let Some(slack) = config.channels.get("slack") {
+                        if let Some(v) = slack.get("bot_token").and_then(|v| v.as_str()) {
+                            map.insert("SLACK_BOT_TOKEN".into(), v.to_string());
+                        }
+                        if let Some(v) = slack.get("app_token").and_then(|v| v.as_str()) {
+                            map.insert("SLACK_APP_TOKEN".into(), v.to_string());
+                        }
+                    }
+                    // Extract Feishu channel config
+                    if let Some(feishu) = config.channels.get("feishu") {
+                        if let Some(v) = feishu.get("app_id").and_then(|v| v.as_str()) {
+                            map.insert("FEISHU_APP_ID".into(), v.to_string());
+                        }
+                        if let Some(v) = feishu.get("app_secret").and_then(|v| v.as_str()) {
+                            map.insert("FEISHU_APP_SECRET".into(), v.to_string());
+                        }
+                        if let Some(v) = feishu.get("domain").and_then(|v| v.as_str()) {
+                            map.insert("FEISHU_DOMAIN".into(), v.to_string());
+                        }
+                    }
                     map.insert("LLM_PROVIDER".into(), config.llm_provider);
                     map.insert("LLM_API_KEY".into(), config.api_key);
                     if !config.model.is_empty() {
@@ -584,7 +646,7 @@ impl SetupApp {
         let mut out = Vec::new();
         for part in raw.split(',') {
             let p = part.trim().to_lowercase();
-            if !matches!(p.as_str(), "telegram" | "discord") {
+            if !matches!(p.as_str(), "telegram" | "discord" | "slack" | "feishu") {
                 continue;
             }
             if !out.iter().any(|v| v == &p) {
@@ -627,6 +689,32 @@ impl SetupApp {
             if username.starts_with('@') {
                 return Err(MicroClawError::Config(
                     "BOT_USERNAME should not include '@'".into(),
+                ));
+            }
+        }
+
+        if self.channel_enabled("slack") {
+            if self.field_value("SLACK_BOT_TOKEN").is_empty() {
+                return Err(MicroClawError::Config(
+                    "SLACK_BOT_TOKEN is required when slack is enabled".into(),
+                ));
+            }
+            if self.field_value("SLACK_APP_TOKEN").is_empty() {
+                return Err(MicroClawError::Config(
+                    "SLACK_APP_TOKEN is required when slack is enabled".into(),
+                ));
+            }
+        }
+
+        if self.channel_enabled("feishu") {
+            if self.field_value("FEISHU_APP_ID").is_empty() {
+                return Err(MicroClawError::Config(
+                    "FEISHU_APP_ID is required when feishu is enabled".into(),
+                ));
+            }
+            if self.field_value("FEISHU_APP_SECRET").is_empty() {
+                return Err(MicroClawError::Config(
+                    "FEISHU_APP_SECRET is required when feishu is enabled".into(),
                 ));
             }
         }
@@ -1013,9 +1101,9 @@ impl SetupApp {
             "LLM_PROVIDER" | "LLM_API_KEY" | "LLM_MODEL" | "LLM_BASE_URL" => "Model",
             "EMBEDDING_PROVIDER" | "EMBEDDING_API_KEY" | "EMBEDDING_BASE_URL"
             | "EMBEDDING_MODEL" | "EMBEDDING_DIM" => "Embedding",
-            "ENABLED_CHANNELS" | "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "DISCORD_BOT_TOKEN" => {
-                "Channel"
-            }
+            "ENABLED_CHANNELS" | "TELEGRAM_BOT_TOKEN" | "BOT_USERNAME" | "DISCORD_BOT_TOKEN"
+            | "SLACK_BOT_TOKEN" | "SLACK_APP_TOKEN" | "FEISHU_APP_ID" | "FEISHU_APP_SECRET"
+            | "FEISHU_DOMAIN" => "Channel",
             _ => "Setup",
         }
     }
@@ -1041,6 +1129,11 @@ impl SetupApp {
             "TELEGRAM_BOT_TOKEN" => 21,
             "BOT_USERNAME" => 22,
             "DISCORD_BOT_TOKEN" => 23,
+            "SLACK_BOT_TOKEN" => 24,
+            "SLACK_APP_TOKEN" => 25,
+            "FEISHU_APP_ID" => 26,
+            "FEISHU_APP_SECRET" => 27,
+            "FEISHU_DOMAIN" => 28,
             _ => usize::MAX,
         }
     }
@@ -1277,7 +1370,7 @@ fn save_config_yaml(
     let mut channels = Vec::new();
     for part in enabled_raw.split(',') {
         let p = part.trim().to_lowercase();
-        if matches!(p.as_str(), "telegram" | "discord") && !channels.iter().any(|v| v == &p) {
+        if matches!(p.as_str(), "telegram" | "discord" | "slack" | "feishu") && !channels.iter().any(|v| v == &p) {
             channels.push(p);
         }
     }
@@ -1285,6 +1378,10 @@ fn save_config_yaml(
     let has_tg =
         !get("TELEGRAM_BOT_TOKEN").trim().is_empty() || !get("BOT_USERNAME").trim().is_empty();
     let has_discord = !get("DISCORD_BOT_TOKEN").trim().is_empty();
+    let has_slack = !get("SLACK_BOT_TOKEN").trim().is_empty()
+        || !get("SLACK_APP_TOKEN").trim().is_empty();
+    let has_feishu = !get("FEISHU_APP_ID").trim().is_empty()
+        || !get("FEISHU_APP_SECRET").trim().is_empty();
 
     let mut yaml = String::new();
     yaml.push_str("# MicroClaw configuration\n\n");
@@ -1296,6 +1393,12 @@ fn save_config_yaml(
         }
         if has_discord {
             inferred.push("discord");
+        }
+        if has_slack {
+            inferred.push("slack");
+        }
+        if has_feishu {
+            inferred.push("feishu");
         }
         if inferred.is_empty() {
             "setup later".to_string()
@@ -1324,6 +1427,30 @@ fn save_config_yaml(
     }
 
     yaml.push_str("web_enabled: true\n\n");
+
+    // Channels section (Slack, Feishu)
+    if has_slack || has_feishu {
+        yaml.push_str("channels:\n");
+        if has_slack {
+            let slack_bt = get("SLACK_BOT_TOKEN");
+            let slack_at = get("SLACK_APP_TOKEN");
+            yaml.push_str("  slack:\n");
+            yaml.push_str(&format!("    bot_token: \"{}\"\n", slack_bt));
+            yaml.push_str(&format!("    app_token: \"{}\"\n", slack_at));
+        }
+        if has_feishu {
+            let feishu_id = get("FEISHU_APP_ID");
+            let feishu_secret = get("FEISHU_APP_SECRET");
+            let feishu_domain = get("FEISHU_DOMAIN");
+            yaml.push_str("  feishu:\n");
+            yaml.push_str(&format!("    app_id: \"{}\"\n", feishu_id));
+            yaml.push_str(&format!("    app_secret: \"{}\"\n", feishu_secret));
+            if !feishu_domain.is_empty() && feishu_domain != "feishu" {
+                yaml.push_str(&format!("    domain: \"{}\"\n", feishu_domain));
+            }
+        }
+        yaml.push('\n');
+    }
 
     yaml.push_str(
         "# LLM provider (anthropic, openai-codex, ollama, openai, openrouter, deepseek, google, etc.)\n",
