@@ -26,6 +26,9 @@ fn default_max_tokens() -> u32 {
 fn default_max_tool_iterations() -> usize {
     100
 }
+fn default_compaction_timeout_secs() -> u64 {
+    180
+}
 fn default_max_history_messages() -> usize {
     50
 }
@@ -130,6 +133,8 @@ pub struct Config {
     pub max_tokens: u32,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: usize,
+    #[serde(default = "default_compaction_timeout_secs")]
+    pub compaction_timeout_secs: u64,
     #[serde(default = "default_max_history_messages")]
     pub max_history_messages: usize,
     #[serde(default = "default_max_document_size_mb")]
@@ -158,6 +163,8 @@ pub struct Config {
     pub discord_bot_token: Option<String>,
     #[serde(default)]
     pub discord_allowed_channels: Vec<u64>,
+    #[serde(default)]
+    pub discord_no_mention: bool,
     #[serde(default)]
     pub show_thinking: bool,
     #[serde(default = "default_web_enabled")]
@@ -215,11 +222,16 @@ impl Config {
     }
 
     /// Skills directory under data root.
+    /// Handles the case where data_dir was overridden to the runtime subdirectory
+    /// (e.g. `microclaw.data/runtime`) — skills always live under the true root.
     pub fn skills_data_dir(&self) -> String {
-        self.data_root_dir()
-            .join("skills")
-            .to_string_lossy()
-            .to_string()
+        let root = self.data_root_dir();
+        let base = if root.ends_with("runtime") {
+            root.parent().unwrap_or(&root).to_path_buf()
+        } else {
+            root
+        };
+        base.join("skills").to_string_lossy().to_string()
     }
 
     pub fn resolve_config_path() -> Result<Option<PathBuf>, MicroClawError> {
@@ -466,6 +478,7 @@ mod tests {
             llm_base_url: None,
             max_tokens: 8192,
             max_tool_iterations: 100,
+            compaction_timeout_secs: 180,
             max_history_messages: 50,
             max_document_size_mb: 100,
             memory_token_budget: 1500,
@@ -480,6 +493,7 @@ mod tests {
             compact_keep_recent: 20,
             discord_bot_token: None,
             discord_allowed_channels: vec![],
+            discord_no_mention: false,
             show_thinking: false,
             web_enabled: true,
             web_host: "127.0.0.1".into(),
