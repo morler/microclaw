@@ -85,6 +85,14 @@ struct TokenState {
     expires_at: Instant,
 }
 
+// Message deduplication cache: keeps track of recently processed message IDs
+// to prevent duplicate processing when Feishu retries messages after timeout.
+struct ProcessedMessageIds {
+    ids: std::collections::HashSet<String>,
+    // We use a simple expiration: entries older than 60 seconds are removed
+    timestamps: std::collections::HashMap<String, std::time::Instant>,
+}
+
 pub struct FeishuAdapter {
     app_id: String,
     app_secret: String,
@@ -940,6 +948,14 @@ pub async fn start_feishu_bot(app_state: Arc<AppState>) {
 
     // WebSocket mode (default)
     info!("Feishu: starting WebSocket long connection");
+
+    // Deduplication cache for message IDs to prevent duplicate processing
+    let processed_message_ids: Arc<RwLock<ProcessedMessageIds>> =
+        Arc::new(RwLock::new(ProcessedMessageIds {
+            ids: std::collections::HashSet::new(),
+            timestamps: std::collections::HashMap::new(),
+        }));
+
     loop {
         if let Err(e) = run_ws_connection(
             app_state.clone(),
@@ -947,6 +963,7 @@ pub async fn start_feishu_bot(app_state: Arc<AppState>) {
             &base_url,
             &http_client,
             &bot_open_id,
+            processed_message_ids.clone(),
         )
         .await
         {
@@ -963,6 +980,7 @@ async fn run_ws_connection(
     base_url: &str,
     http_client: &reqwest::Client,
     bot_open_id: &str,
+    processed_message_ids: Arc<RwLock<ProcessedMessageIds>>,
 ) -> Result<(), String> {
     let (ws_url, ping_interval) = get_ws_endpoint(
         http_client,
@@ -1056,8 +1074,9 @@ async fn run_ws_connection(
                     let bot_id = bot_open_id.to_string();
                     let cfg = feishu_cfg.clone();
                     let base = base_url.to_string();
+                    let dedup_cache = processed_message_ids.clone();
                     tokio::spawn(async move {
-                        handle_feishu_event(state, &cfg, &base, &bot_id, &event).await;
+                        handle_feishu_event(state, &cfg, &base, &bot_id, &event, Some(dedup_cache)).await;
                     });
                 } else if frame.method == FRAME_METHOD_CONTROL {
                     // pong or other control frames — no action needed
@@ -1087,7 +1106,7 @@ async fn send_ack(write: &WsSink, request_frame: &pb::Frame) {
         seq_id: request_frame.seq_id,
         log_id: request_frame.log_id,
         service: request_frame.service,
-        method: request_frame.method,
+        method: FRAME_METHOD_CONTROL, // ACK must use CONTROL method (0), not the original message's method
         headers: request_frame
             .headers
             .iter()
@@ -1119,6 +1138,7 @@ async fn handle_feishu_event(
     base_url: &str,
     bot_open_id: &str,
     event: &serde_json::Value,
+    processed_message_ids: Option<Arc<RwLock<ProcessedMessageIds>>>,
 ) {
     // The event structure for im.message.receive_v1:
     // {
@@ -1182,6 +1202,37 @@ async fn handle_feishu_event(
         .get("message_id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    // Deduplication: check if this message has already been processed
+    // This prevents duplicate processing when Feishu retries messages after timeout
+    // IMPORTANT: We mark the message as "in progress" BEFORE processing starts,
+    // not after it completes. This prevents race conditions where duplicate messages
+    // arrive while the first one is still being processed.
+    if !message_id.is_empty() {
+        if let Some(ref cache) = processed_message_ids {
+            let mut cache = cache.write().await;
+            let now = Instant::now();
+            // Clean up old entries (older than 60 seconds)
+            let expired_ids: Vec<String> = cache
+                .timestamps
+                .iter()
+                .filter(|(_, timestamp)| now.duration_since(**timestamp) > Duration::from_secs(60))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &expired_ids {
+                cache.ids.remove(id);
+                cache.timestamps.remove(id);
+            }
+            // Check if already processed (or currently being processed)
+            if cache.ids.contains(message_id) {
+                info!("Feishu: skipping duplicate message {}", message_id);
+                return;
+            }
+            // Mark as "in progress" BEFORE processing starts
+            cache.ids.insert(message_id.to_string());
+            cache.timestamps.insert(message_id.to_string(), now);
+        }
+    }
 
     if chat_id_str.is_empty() || content_raw.is_empty() {
         return;
@@ -1541,7 +1592,7 @@ pub fn register_feishu_webhook(router: axum::Router, app_state: Arc<AppState>) -
                 // Process the event
                 let event = body.0;
                 tokio::spawn(async move {
-                    handle_feishu_event(state, &cfg, &base, &bot_id, &event).await;
+                    handle_feishu_event(state, &cfg, &base, &bot_id, &event, None).await;
                 });
 
                 axum::Json(serde_json::json!({"code": 0}))
