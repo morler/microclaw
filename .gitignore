@@ -8,3 +8,6 @@ website/
 tmp/
 working_dir/
 web/node_modules/
+task_plan.md
+progress.md
+findings.md
