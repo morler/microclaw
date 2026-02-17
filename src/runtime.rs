@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::embedding::EmbeddingProvider;
 use crate::llm::LlmProvider;
-use crate::memory::MemoryManager;
+use crate::memory::{MemoryManager, SqliteMemory};
 use crate::skills::SkillManager;
 use crate::tools::ToolRegistry;
 use crate::web::WebAdapter;
@@ -22,6 +22,7 @@ pub struct AppState {
     pub channel_registry: Arc<ChannelRegistry>,
     pub db: Arc<Database>,
     pub memory: MemoryManager,
+    pub sqlite_memory: Option<SqliteMemory>,
     pub skills: SkillManager,
     pub llm: Box<dyn LlmProvider>,
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
@@ -102,6 +103,23 @@ pub async fn run(
 
     let channel_registry = Arc::new(registry);
 
+    // Initialize SqliteMemory if memory_backend is "sqlite" or "file+sqlite"
+    let use_sqlite = matches!(config.memory_backend.as_str(), "sqlite" | "file+sqlite");
+    let sqlite_memory = if use_sqlite {
+        match SqliteMemory::new(std::path::Path::new(&config.data_dir)) {
+            Ok(mem) => {
+                info!("SqliteMemory backend initialized");
+                Some(mem)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize SqliteMemory: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut tools = ToolRegistry::new(&config, channel_registry.clone(), db.clone());
 
     for (server, tool_info) in mcp_manager.all_tools() {
@@ -113,6 +131,7 @@ pub async fn run(
         channel_registry,
         db,
         memory,
+        sqlite_memory,
         skills,
         llm,
         embedding,

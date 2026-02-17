@@ -41,6 +41,14 @@ memory_token_budget: 1500
 # embedding_base_url: ""
 # embedding_model: "text-embedding-3-small"
 # embedding_dim: 1536
+
+# Memory backend: "original" | "sqlite" (default: "original")
+# - "original": file memory + memories table in microclaw.db
+# - "sqlite": file memory + SqliteMemory (brain.db with FTS5 + vector search)
+# memory_backend: "original"
+# sqlite_memory_vector_weight: 0.7
+# sqlite_memory_keyword_weight: 0.3
+
 # Data root directory:
 # - runtime files go to <data_dir>/runtime
 # - built-in/custom skills are loaded from <data_dir>/skills

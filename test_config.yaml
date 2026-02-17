@@ -1,0 +1,12 @@
+# MicroClaw config for testing SqliteMemory
+telegram_bot_token: ""
+bot_username: ""
+api_key: ""
+
+# Enable SqliteMemory
+enable_sqlite_memory: true
+sqlite_memory_vector_weight: 0.7
+sqlite_memory_keyword_weight: 0.3
+
+# Data directory
+data_dir: "./test_data"

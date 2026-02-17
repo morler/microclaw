@@ -5,6 +5,7 @@ use tracing::{info, warn};
 use crate::db::{call_blocking, Database, StoredMessage};
 use crate::embedding::EmbeddingProvider;
 use crate::llm_types::{ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock};
+use crate::memory::{self, Memory};
 use crate::memory_quality;
 use crate::runtime::AppState;
 use crate::text::floor_char_boundary;
@@ -181,6 +182,23 @@ async fn maybe_handle_explicit_memory_command(
         ));
     }
 
+    // Use SqliteMemory if memory_backend is "sqlite"
+    if matches!(state.config.memory_backend.as_str(), "sqlite") {
+        if let Some(ref sqlite_mem) = state.sqlite_memory {
+            // Check for existing memory
+            let key = format!("explicit_{}", chat_id);
+            if sqlite_mem.get(&key).await?.is_some() {
+                // Update existing
+                sqlite_mem.store(&key, &explicit_content, memory::MemoryCategory::Core).await?;
+                return Ok(Some(format!("Noted. Updated memory: {explicit_content}")));
+            }
+            // Store new
+            sqlite_mem.store(&key, &explicit_content, memory::MemoryCategory::Core).await?;
+            return Ok(Some(format!("Noted. Saved memory: {explicit_content}")));
+        }
+    }
+
+    // Default: use original memories table in microclaw.db
     let existing = call_blocking(state.db.clone(), move |db| {
         db.get_all_memories_for_chat(Some(chat_id))
     })
@@ -349,15 +367,31 @@ pub(crate) async fn process_with_agent_impl(
 
     // Build system prompt
     let file_memory = state.memory.build_memory_context(chat_id);
-    let db_memory = build_db_memory_context(
-        &state.db,
-        &state.embedding,
-        chat_id,
-        &query,
-        state.config.memory_token_budget,
-    )
-    .await;
-    let memory_context = format!("{}{}", file_memory, db_memory);
+
+    // Build structured memory context based on memory_backend config
+    let structured_memory = match state.config.memory_backend.as_str() {
+        "sqlite" => {
+            // Use SqliteMemory (brain.db) instead of original memories table
+            if let Some(ref sqlite_mem) = state.sqlite_memory {
+                build_sqlite_memory_context(sqlite_mem, &query, state.config.memory_token_budget).await
+            } else {
+                String::new()
+            }
+        }
+        _ => {
+            // Default: use original memories table (db_memory)
+            build_db_memory_context(
+                &state.db,
+                &state.embedding,
+                chat_id,
+                &query,
+                state.config.memory_token_budget,
+            )
+            .await
+        }
+    };
+
+    let memory_context = format!("{}{}", file_memory, structured_memory);
     let skills_catalog = state.skills.build_skills_catalog();
     let soul_content = load_soul_content(&state.config, chat_id);
     let system_prompt = build_system_prompt(
@@ -776,6 +810,47 @@ fn score_relevance_with_cache(
         .iter()
         .filter(|t| query_tokens.contains(*t))
         .count()
+}
+
+pub(crate) async fn build_sqlite_memory_context(
+    sqlite_mem: &memory::SqliteMemory,
+    query: &str,
+    token_budget: usize,
+) -> String {
+    use memory::MemoryEntry;
+
+    if query.trim().is_empty() {
+        return String::new();
+    }
+
+    // Estimate tokens (rough: 4 chars per token)
+    let max_tokens = token_budget / 4;
+    let limit = (max_tokens / 20).max(10); // ~20 chars per memory entry
+
+    match sqlite_mem.recall(query, limit).await {
+        Ok(memories) if !memories.is_empty() => {
+            let mut out = String::from("<sqlite_memories>\n");
+            for MemoryEntry { key: _, content, category, score, .. } in &memories {
+                let score_str = score.map(|s| format!(" (score: {:.2})", s)).unwrap_or_default();
+                out.push_str(&format!(
+                    "- [{}] {}{}\n",
+                    category, content, score_str
+                ));
+            }
+            out.push_str("</sqlite_memories>\n");
+            info!(
+                "SqliteMemory recall: chat_id=?, query={}, results={}",
+                query,
+                memories.len()
+            );
+            out
+        }
+        Ok(_) => String::new(),
+        Err(e) => {
+            tracing::warn!("SqliteMemory recall failed: {e}");
+            String::new()
+        }
+    }
 }
 
 pub(crate) async fn build_db_memory_context(
@@ -1475,6 +1550,9 @@ mod tests {
             embedding_base_url: None,
             embedding_model: None,
             embedding_dim: None,
+            memory_backend: "original".to_string(),
+            sqlite_memory_vector_weight: 0.7,
+            sqlite_memory_keyword_weight: 0.3,
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
@@ -1491,6 +1569,7 @@ mod tests {
             channel_registry: channel_registry.clone(),
             db: db.clone(),
             memory: MemoryManager::new(runtime_dir.to_str().unwrap()),
+            sqlite_memory: None,
             skills: SkillManager::from_skills_dir(&cfg.skills_data_dir()),
             llm,
             embedding: None,
@@ -1811,6 +1890,9 @@ mod tests {
             embedding_base_url: None,
             embedding_model: None,
             embedding_dim: None,
+            memory_backend: "original".to_string(),
+            sqlite_memory_vector_weight: 0.7,
+            sqlite_memory_keyword_weight: 0.3,
             reflector_enabled: true,
             reflector_interval_mins: 15,
             channels: std::collections::HashMap::new(),
@@ -1871,6 +1953,9 @@ mod tests {
             embedding_base_url: None,
             embedding_model: None,
             embedding_dim: None,
+            memory_backend: "original".to_string(),
+            sqlite_memory_vector_weight: 0.7,
+            sqlite_memory_keyword_weight: 0.3,
             reflector_enabled: true,
             reflector_interval_mins: 15,
             channels: std::collections::HashMap::new(),

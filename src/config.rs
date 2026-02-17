@@ -88,6 +88,15 @@ fn default_web_session_idle_ttl_seconds() -> u64 {
 fn default_model_prices() -> Vec<ModelPrice> {
     Vec::new()
 }
+fn default_memory_backend() -> String {
+    "both".to_string()
+}
+fn default_sqlite_memory_vector_weight() -> f32 {
+    0.7
+}
+fn default_sqlite_memory_keyword_weight() -> f32 {
+    0.3
+}
 fn default_reflector_enabled() -> bool {
     true
 }
@@ -187,6 +196,18 @@ pub struct Config {
     pub embedding_model: Option<String>,
     #[serde(default)]
     pub embedding_dim: Option<usize>,
+
+    // --- SqliteMemory (zeroclaw-style brain.db) ---
+    /// Memory backend: "original" | "sqlite" | "both" (default: "both")
+    #[serde(default = "default_memory_backend")]
+    pub memory_backend: String,
+    /// Vector weight for hybrid search (0.0-1.0)
+    #[serde(default = "default_sqlite_memory_vector_weight")]
+    pub sqlite_memory_vector_weight: f32,
+    /// Keyword weight for hybrid search (0.0-1.0)
+    #[serde(default = "default_sqlite_memory_keyword_weight")]
+    pub sqlite_memory_keyword_weight: f32,
+
     #[serde(default)]
     pub openai_api_key: Option<String>,
 
@@ -573,6 +594,9 @@ mod tests {
             embedding_base_url: None,
             embedding_model: None,
             embedding_dim: None,
+            memory_backend: "original".to_string(),
+            sqlite_memory_vector_weight: 0.7,
+            sqlite_memory_keyword_weight: 0.3,
             reflector_enabled: true,
             reflector_interval_mins: 15,
             soul_path: None,
