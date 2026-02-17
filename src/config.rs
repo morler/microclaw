@@ -51,6 +51,9 @@ fn default_working_dir_isolation() -> WorkingDirIsolation {
 fn default_timezone() -> String {
     "UTC".into()
 }
+fn default_sandbox_enabled() -> bool {
+    false
+}
 fn default_max_session_messages() -> usize {
     40
 }
@@ -164,6 +167,10 @@ pub struct Config {
     pub timezone: String,
     #[serde(default = "default_control_chat_ids")]
     pub control_chat_ids: Vec<i64>,
+
+    // --- Sandbox ---
+    #[serde(default = "default_sandbox_enabled")]
+    pub sandbox_enabled: bool,
 
     // --- Web UI ---
     #[serde(default = "default_web_enabled")]

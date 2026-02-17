@@ -11,6 +11,7 @@ pub mod memory;
 pub mod path_guard;
 pub mod read_file;
 pub mod schedule;
+pub mod sandbox;
 pub mod send_message;
 pub mod structured_memory;
 pub mod sub_agent;
@@ -350,6 +351,11 @@ impl ToolRegistry {
             Box::new(schedule::GetTaskHistoryTool::new(
                 channel_registry.clone(),
                 db.clone(),
+            )),
+            Box::new(sandbox::SandboxTool::new_with_config(
+                &config.working_dir,
+                config.working_dir_isolation,
+                config.sandbox_enabled,
             )),
             Box::new(export_chat::ExportChatTool::new(
                 db.clone(),

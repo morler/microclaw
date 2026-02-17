@@ -132,3 +132,7 @@ web_session_idle_ttl_seconds: 300
 # Supports markdown format. If not set, checks data_dir/SOUL.md then ./SOUL.md.
 # Per-chat overrides: place SOUL.md in <data_dir>/runtime/groups/<chat_id>/SOUL.md
 # soul_path: "./SOUL.md"
+
+# Sandbox (Microsandbox) - Execute Python code in isolated environment
+# Requires microsandbox to be installed: curl -sSL https://get.microsandbox.dev | sh
+# sandbox_enabled: false  # Default is false, set to true to enable
