@@ -33,6 +33,64 @@ use crate::text::split_text;
 use crate::usage::build_usage_report;
 
 // ---------------------------------------------------------------------------
+// Message deduplication cache
+// ---------------------------------------------------------------------------
+
+/// Cache to track processed message IDs and prevent duplicate processing.
+/// Feishu may retry events if the server doesn't respond in time.
+struct ProcessedMessageCache {
+    /// Set of message IDs that have been processed
+    processed: std::collections::HashSet<String>,
+    /// Timestamps for cleanup (message_id -> processing time)
+    timestamps: std::collections::HashMap<String, Instant>,
+}
+
+impl ProcessedMessageCache {
+    fn new() -> Self {
+        Self {
+            processed: std::collections::HashSet::new(),
+            timestamps: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Check if a message has been processed recently (within the TTL).
+    /// Returns true if the message was already processed and should be skipped.
+    fn is_duplicate(&self, message_id: &str, ttl: Duration) -> bool {
+        if let Some(ts) = self.timestamps.get(message_id) {
+            return Instant::now().duration_since(*ts) < ttl;
+        }
+        false
+    }
+
+    /// Mark a message as processed
+    fn mark_processed(&mut self, message_id: String) {
+        self.processed.insert(message_id.clone());
+        self.timestamps.insert(message_id, Instant::now());
+    }
+
+    /// Clean up expired entries
+    fn cleanup(&mut self, ttl: Duration) {
+        let now = Instant::now();
+        self.timestamps.retain(|id, ts| {
+            let expired = now.duration_since(*ts) >= ttl;
+            if expired {
+                self.processed.remove(id);
+            }
+            !expired
+        });
+    }
+}
+
+/// Module-level cache for processed message IDs.
+/// Using a simple in-memory cache with TTL of 5 minutes.
+static PROCESSED_MESSAGES: std::sync::OnceLock<tokio::sync::RwLock<ProcessedMessageCache>> =
+    std::sync::OnceLock::new();
+
+fn get_processed_cache() -> &'static tokio::sync::RwLock<ProcessedMessageCache> {
+    PROCESSED_MESSAGES.get_or_init(|| tokio::sync::RwLock::new(ProcessedMessageCache::new()))
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -1566,27 +1624,15 @@ pub fn register_feishu_webhook(router: axum::Router, app_state: Arc<AppState>) -
                     return axum::Json(serde_json::json!({ "challenge": challenge }));
                 }
 
-                // Resolve bot_open_id (we need it for mention detection)
+                // Resolve bot_open_id for proper mention detection and message deduplication
                 let http_client = reqwest::Client::new();
-                let bot_open_id =
-                    match get_token(&http_client, &base, &cfg.app_id, &cfg.app_secret).await {
-                        Ok(_token) => String::new(), // Will be resolved below
-                        Err(_) => String::new(),
-                    };
-
-                // Try to resolve bot open_id for proper mention detection
-                let bot_id = if bot_open_id.is_empty() {
-                    if let Ok(token) =
-                        get_token(&http_client, &base, &cfg.app_id, &cfg.app_secret).await
-                    {
+                let bot_id = match get_token(&http_client, &base, &cfg.app_id, &cfg.app_secret).await {
+                    Ok(token) => {
                         resolve_bot_open_id(&http_client, &base, &token)
                             .await
                             .unwrap_or_default()
-                    } else {
-                        String::new()
                     }
-                } else {
-                    bot_open_id
+                    Err(_) => String::new(),
                 };
 
                 // Process the event
