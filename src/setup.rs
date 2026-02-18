@@ -1352,6 +1352,7 @@ fn perform_online_validation(
     model: &str,
     codex_account_id: Option<&str>,
 ) -> Result<Vec<String>, MicroClawError> {
+    const VALIDATION_MAX_OUTPUT_TOKENS: u32 = 64;
     let mut checks = Vec::new();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -1409,7 +1410,7 @@ fn perform_online_validation(
         }
         let body = serde_json::json!({
             "model": model,
-            "max_tokens": 1,
+            "max_tokens": VALIDATION_MAX_OUTPUT_TOKENS,
             "messages": [{"role": "user", "content": "hi"}]
         });
         let resp = client
@@ -1463,7 +1464,7 @@ fn perform_online_validation(
             let endpoint = format!("{}/chat/completions", base.trim_end_matches('/'));
             let mut body = serde_json::json!({
                 "model": model,
-                "max_tokens": 1,
+                "max_tokens": VALIDATION_MAX_OUTPUT_TOKENS,
                 "messages": [{"role": "user", "content": "hi"}]
             });
             let mut resp = send_openai_validation_chat_request(&client, &endpoint, api_key, &body)?;
@@ -1486,6 +1487,12 @@ fn perform_online_validation(
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().unwrap_or_default();
+            if is_validation_output_capped_error(&text) {
+                checks.push(format!(
+                    "LLM OK (openai-compatible, model={model}; probe output capped)"
+                ));
+                return Ok(checks);
+            }
             let detail = extract_openai_error_detail(status, &text);
             return Err(MicroClawError::Config(format!(
                 "LLM validation failed: {detail}"
@@ -1540,6 +1547,12 @@ fn should_retry_with_max_completion_tokens(error_text: &str) -> bool {
 
     let lower = error_text.to_ascii_lowercase();
     lower.contains("max_tokens") && lower.contains("max_completion_tokens")
+}
+
+fn is_validation_output_capped_error(error_text: &str) -> bool {
+    let lower = error_text.to_ascii_lowercase();
+    lower.contains("max_tokens or model output limit was reached")
+        || (lower.contains("max_tokens") && lower.contains("output limit"))
 }
 
 fn switch_to_max_completion_tokens(body: &mut serde_json::Value) -> bool {
@@ -2569,6 +2582,14 @@ mod tests {
         assert_eq!(body.get("max_tokens"), None);
         assert_eq!(body["max_completion_tokens"], 1);
         assert!(!switch_to_max_completion_tokens(&mut body));
+    }
+
+    #[test]
+    fn test_is_validation_output_capped_error() {
+        assert!(is_validation_output_capped_error(
+            "Could not finish the message because max_tokens or model output limit was reached"
+        ));
+        assert!(!is_validation_output_capped_error("invalid api key"));
     }
 
     #[test]
