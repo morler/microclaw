@@ -29,8 +29,15 @@ Main orchestration files in `src/`:
 - `main.rs`: CLI entry (`start`, `setup`, etc.)
 - `runtime.rs`: app wiring (`AppState`), provider/tool initialization, channel boot
 - `agent_engine.rs`: shared agent loop (`process_with_agent`), explicit-memory fast path, compaction, tool loop
+- `hooks.rs`: hooks discovery/runtime/CLI (`hooks list/info/enable/disable`)
 - `llm.rs`: provider implementations + stream handling + format translation
-- `web.rs`: Web API routes, stream APIs, config endpoints
+- `otlp.rs`: OTLP metrics exporter (HTTP/protobuf)
+- `web.rs`: Web API router, shared web state, stream APIs, config endpoints
+- `web/auth.rs`: auth handlers (session login/logout, password, API key lifecycle)
+- `web/config.rs`: config read/update + config self-check handlers
+- `web/sessions.rs`: session/history/reset/delete/fork/tree handlers
+- `web/metrics.rs`: metrics snapshot/history handlers
+- `web/stream.rs`: streaming send/status/SSE handlers
 - `scheduler.rs`: scheduled-task runner + memory reflector loop
 - `skills.rs`: skill discovery/activation
 - `mcp.rs`: MCP server/tool integration
@@ -103,16 +110,47 @@ Surfaces:
 - schema creation + schema-version migrations (`db_meta`, `schema_migrations`)
 - chat/message/session/task persistence
 - structured memory CRUD + archive/supersede
+- auth/session/api-key persistence (scopes, expiry, rotation)
+- audit log persistence (`audit_logs`)
 - usage and memory observability queries
+- metrics history persistence (`metrics_history`)
 
 ## Web/API
 
 `web.rs` routes include:
 - chat send/send_stream + SSE stream replay
-- sessions/history/reset/delete
-- config read/update
+- auth APIs (`/api/auth/*`) with session cookie + API key scopes
+- sessions/history/reset/delete/fork/tree
+- config read/update + self-check (`/api/config/self_check`)
+- audit query (`/api/audit`)
+- metrics APIs (`/api/metrics`, `/api/metrics/summary`, `/api/metrics/history`)
 - usage text report (`/api/usage`)
 - memory observability series (`/api/memory_observability`)
+
+## Hooks
+
+Hook assets and spec:
+- runtime hook dirs: `hooks/<name>/HOOK.md`
+- hook spec doc: `docs/hooks/HOOK.md`
+- sample hooks: `hooks/block-bash/`, `hooks/redact-tool-output/`
+
+Hook runtime supports:
+- events: `BeforeLLMCall`, `BeforeToolCall`, `AfterToolCall`
+- outcomes: `allow`, `block`, `modify` (structured fields only)
+
+## Observability Docs
+
+- metrics docs: `docs/observability/metrics.md`
+- operations runbook: `docs/operations/runbook.md`
+- PR/release checklist: `docs/releases/pr-release-checklist.md`
+- upgrade guide: `docs/releases/upgrade-guide.md`
+- regression/stability reports: `docs/reports/*.md`
+
+OTLP exporter supports bounded queue + retry backoff tuning:
+- `otlp_queue_capacity`
+- `otlp_retry_max_attempts`
+- `otlp_retry_base_ms`
+- `otlp_retry_max_ms`
 
 ## Build and test
 
