@@ -730,33 +730,22 @@ Bot: Port 5433.
 ## Architecture
 
 ```
+crates/
+    microclaw-core/      # Shared error/types/text modules
+    microclaw-storage/   # SQLite DB + memory domain + usage reporting
+    microclaw-tools/     # Tool runtime primitives + sandbox + helper engines
+    microclaw-channels/  # Channel abstractions and routing boundary
+    microclaw-app/       # App-level support modules (logging, builtin skills, transcribe)
+
 src/
-    main.rs              # Entry point, CLI
-    config.rs            # Environment variable loading
-    error.rs             # Error types (thiserror)
-    telegram.rs          # Telegram handler, agentic tool-use loop, session resume, context compaction, typing indicator
-    llm.rs               # LLM provider abstraction (Anthropic + OpenAI-compatible)
-    llm_types.rs         # Canonical message/tool schema shared across LLM adapters
-    db.rs                # SQLite: messages, chats, scheduled_tasks, sessions
-    memory.rs            # AGENTS.md memory system
-    skills.rs            # Agent skills system (discovery, activation)
-    scheduler.rs         # Background task scheduler (60s polling loop)
-    tools/
-        mod.rs           # Tool trait + registry (22 tools)
-        bash.rs          # Shell execution
-        read_file.rs     # File reading
-        write_file.rs    # File writing
-        edit_file.rs     # Find/replace editing
-        glob.rs          # File pattern matching
-        grep.rs          # Regex content search
-        memory.rs        # Memory read/write tools
-        web_search.rs    # DuckDuckGo web search
-        web_fetch.rs     # URL fetching with HTML stripping
-        send_message.rs  # Mid-conversation messaging (text + channel attachments)
-        schedule.rs      # 5 scheduling tools (create/list/pause/resume/cancel)
-        sub_agent.rs     # Sub-agent with restricted tool registry
-        activate_skill.rs # Skill activation tool
-        todo.rs          # Plan & execute todo tools
+    main.rs              # CLI entry point
+    runtime.rs           # Runtime bootstrap + adapter startup
+    agent_engine.rs      # Channel-agnostic agent loop
+    llm.rs               # Provider abstraction (Anthropic/OpenAI-compatible/Codex)
+    channels/*.rs        # Concrete channel adapters (Telegram/Discord/Slack/Feishu)
+    tools/*.rs           # Built-in tool implementations + registry assembly
+    scheduler.rs         # Background scheduler and reflector loop
+    web.rs               # Web API + stream endpoints
 ```
 
 Key design decisions:
