@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod service;
 pub mod tools;
 
 pub use microclaw_clawhub::client;

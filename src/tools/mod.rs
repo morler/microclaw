@@ -135,7 +135,7 @@ impl ToolRegistry {
         ];
 
         // Add ClawHub tools if enabled
-        if config.clawhub_agent_tools_enabled {
+        if config.clawhub.agent_tools_enabled {
             tools.push(Box::new(crate::clawhub::tools::ClawHubSearchTool::new(
                 config,
             )));

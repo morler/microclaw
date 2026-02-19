@@ -1,16 +1,15 @@
+use crate::clawhub::service::{ClawHubGateway, RegistryClawHubGateway};
 use crate::config::Config;
 use crate::error::MicroClawError;
-use microclaw_clawhub::client::ClawHubClient;
-use microclaw_clawhub::install::{install_skill, InstallOptions};
-use microclaw_clawhub::lockfile::read_lockfile;
+use microclaw_clawhub::install::InstallOptions;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 pub fn handle_skill_cli(args: &[String], config: &Config) -> Result<(), MicroClawError> {
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("help");
 
-    let registry = &config.clawhub_registry;
-    let token = config.clawhub_token.clone();
+    let gateway: Arc<dyn ClawHubGateway> = Arc::new(RegistryClawHubGateway::from_config(config));
 
     let rt = Runtime::new().map_err(|e| MicroClawError::Config(e.to_string()))?;
 
@@ -22,9 +21,9 @@ pub fn handle_skill_cli(args: &[String], config: &Config) -> Result<(), MicroCla
                 eprintln!("Usage: microclaw skill search <query>");
                 return Ok(());
             }
+            let gateway = gateway.clone();
             rt.block_on(async {
-                let client = ClawHubClient::new(registry, token);
-                match client.search(query, 10, "trending").await {
+                match gateway.search(query, 10, "trending").await {
                     Ok(results) => {
                         println!("Found {} skills:\n", results.len());
                         for r in results {
@@ -52,14 +51,15 @@ pub fn handle_skill_cli(args: &[String], config: &Config) -> Result<(), MicroCla
             let skills_dir = PathBuf::from(config.skills_data_dir());
             let lockfile_path = config.data_root_dir().join("clawhub.lock.json");
 
+            let gateway = gateway.clone();
             rt.block_on(async {
-                let client = ClawHubClient::new(registry, token);
                 let options = InstallOptions {
                     force: args.contains(&"--force".to_string()),
                     skip_gates: false,
-                    skip_security: config.clawhub_skip_security_warnings,
+                    skip_security: config.clawhub.skip_security_warnings,
                 };
-                match install_skill(&client, slug, None, &skills_dir, &lockfile_path, &options)
+                match gateway
+                    .install(slug, None, &skills_dir, &lockfile_path, &options)
                     .await
                 {
                     Ok(result) => {
@@ -75,7 +75,7 @@ pub fn handle_skill_cli(args: &[String], config: &Config) -> Result<(), MicroCla
         }
         "list" => {
             let lockfile_path = config.data_root_dir().join("clawhub.lock.json");
-            let lock = read_lockfile(&lockfile_path)?;
+            let lock = gateway.read_lockfile(&lockfile_path)?;
             if lock.skills.is_empty() {
                 println!("No ClawHub skills installed.");
             } else {
@@ -96,9 +96,9 @@ pub fn handle_skill_cli(args: &[String], config: &Config) -> Result<(), MicroCla
                 eprintln!("Usage: microclaw skill inspect <slug>");
                 return Ok(());
             }
+            let gateway = gateway.clone();
             rt.block_on(async {
-                let client = ClawHubClient::new(registry, token);
-                match client.get_skill(slug).await {
+                match gateway.get_skill(slug).await {
                     Ok(meta) => {
                         println!("Skill: {} ({})", meta.name, meta.slug);
                         println!("{}", meta.description);

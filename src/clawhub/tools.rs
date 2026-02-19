@@ -1,18 +1,19 @@
+use crate::clawhub::service::{ClawHubGateway, RegistryClawHubGateway};
 use crate::config::Config;
 use crate::llm_types::ToolDefinition;
 use crate::tools::{schema_object, Tool, ToolResult};
 use async_trait::async_trait;
-use microclaw_clawhub::client::ClawHubClient;
-use microclaw_clawhub::install::{install_skill, InstallOptions};
+use microclaw_clawhub::install::InstallOptions;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 pub struct ClawHubSearchTool {
-    client: ClawHubClient,
+    gateway: Arc<dyn ClawHubGateway>,
 }
 
 pub struct ClawHubInstallTool {
-    client: ClawHubClient,
+    gateway: Arc<dyn ClawHubGateway>,
     skills_dir: PathBuf,
     lockfile_path: PathBuf,
     skip_security: bool,
@@ -20,8 +21,9 @@ pub struct ClawHubInstallTool {
 
 impl ClawHubSearchTool {
     pub fn new(config: &Config) -> Self {
-        let client = ClawHubClient::new(&config.clawhub_registry, config.clawhub_token.clone());
-        Self { client }
+        let gateway: Arc<dyn ClawHubGateway> =
+            Arc::new(RegistryClawHubGateway::from_config(config));
+        Self { gateway }
     }
 }
 
@@ -70,7 +72,8 @@ impl Tool for ClawHubSearchTool {
             Ok(rt) => rt,
             Err(e) => return ToolResult::error(e.to_string()),
         };
-        let results = rt.block_on(async { self.client.search(query, limit.min(50), sort).await });
+        let gateway = self.gateway.clone();
+        let results = rt.block_on(async move { gateway.search(query, limit.min(50), sort).await });
 
         match results {
             Ok(results) => {
@@ -100,14 +103,15 @@ impl Tool for ClawHubSearchTool {
 
 impl ClawHubInstallTool {
     pub fn new(config: &Config) -> Self {
-        let client = ClawHubClient::new(&config.clawhub_registry, config.clawhub_token.clone());
+        let gateway: Arc<dyn ClawHubGateway> =
+            Arc::new(RegistryClawHubGateway::from_config(config));
         let skills_dir = PathBuf::from(config.skills_data_dir());
         let lockfile_path = config.data_root_dir().join("clawhub.lock.json");
         Self {
-            client,
+            gateway,
             skills_dir,
             lockfile_path,
-            skip_security: config.clawhub_skip_security_warnings,
+            skip_security: config.clawhub.skip_security_warnings,
         }
     }
 }
@@ -158,21 +162,22 @@ impl Tool for ClawHubInstallTool {
             Ok(rt) => rt,
             Err(e) => return ToolResult::error(e.to_string()),
         };
+        let gateway = self.gateway.clone();
         let result = rt.block_on(async {
             let options = InstallOptions {
                 force,
                 skip_gates: false,
                 skip_security: self.skip_security,
             };
-            install_skill(
-                &self.client,
-                slug,
-                version,
-                &self.skills_dir,
-                &self.lockfile_path,
-                &options,
-            )
-            .await
+            gateway
+                .install(
+                    slug,
+                    version,
+                    &self.skills_dir,
+                    &self.lockfile_path,
+                    &options,
+                )
+                .await
         });
 
         match result {
